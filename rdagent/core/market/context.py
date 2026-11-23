@@ -91,5 +91,5 @@ class MarketContext:
         ):
             raise ValueError(  # noqa: EM101, TRY003
                 "Training, validation and test periods must be chronological "
-                "and non-overlapping"
+                "and non-overlapping"  # noqa: EM101, TRY003
             )

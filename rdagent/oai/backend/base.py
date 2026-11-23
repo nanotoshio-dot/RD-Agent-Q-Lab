@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, ForwardRef, List, Optional, Tuple, Type, Union, cast
+from typing import Any, Callable, List, Optional, Tuple, Type, Union, cast
 
 import pytz
 from pydantic import BaseModel, TypeAdapter
@@ -708,7 +708,7 @@ class APIBackend(ABC):
             all_response = parser.parse(all_response)
             if json_target_type:
                 # deepseek will enter this branch
-                TypeAdapter(ForwardRef(json_target_type)).validate_json(all_response)
+                TypeAdapter(cast(Any, json_target_type)).validate_json(all_response)
 
         # 4) code block extraction
         if code_block_language:

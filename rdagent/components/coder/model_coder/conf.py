@@ -3,7 +3,14 @@ from typing import Optional
 from pydantic_settings import SettingsConfigDict
 
 from rdagent.components.coder.CoSTEER.config import CoSTEERSettings
-from rdagent.utils.env import Env, QlibCondaConf, QlibCondaEnv, QlibLocalConf, QlibLocalEnv, QTDockerEnv
+from rdagent.utils.env import (
+    Env,
+    QlibCondaConf,
+    QlibCondaEnv,
+    QlibLocalConf,
+    QlibLocalEnv,
+    QTDockerEnv,
+)
 
 
 class ModelCoSTEERSettings(CoSTEERSettings):

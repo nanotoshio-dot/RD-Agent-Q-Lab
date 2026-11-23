@@ -59,9 +59,10 @@ class MarketContext:
                 raise TypeError(f"{field_name} must be a pathlib.Path")  # noqa: EM102, TRY003
 
     def _validate_universe(self) -> None:
-        if not isinstance(self.universe, tuple) or not self.universe or any(
-            not isinstance(item, str) or not item.strip()
-            for item in self.universe
+        if (
+            not isinstance(self.universe, tuple)
+            or not self.universe
+            or any(not isinstance(item, str) or not item.strip() for item in self.universe)
         ):
             raise ValueError("universe must contain non-empty instrument groups")  # noqa: EM101, TRY003
 
@@ -85,12 +86,6 @@ class MarketContext:
             raise ValueError("Invalid test period")  # noqa: EM101, TRY003
 
     def _validate_period_order(self) -> None:
-        if not (
-            self.train_end < self.valid_start
-            and self.valid_end < self.test_start
-        ):
-            message = (
-                "Training, validation and test periods must be chronological "
-                "and non-overlapping"
-            )
+        if not (self.train_end < self.valid_start and self.valid_end < self.test_start):
+            message = "Training, validation and test periods must be chronological " "and non-overlapping"
             raise ValueError(message)  # noqa: TRY003

@@ -11,7 +11,7 @@ class MarketProcessConfig:
     model_env_type: str = "local"
     factor_python_bin: str = "python"
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not isinstance(self.context, MarketContext):
             raise TypeError("context must be a MarketContext")
         if not self.model_env_type.strip() or not self.factor_python_bin.strip():

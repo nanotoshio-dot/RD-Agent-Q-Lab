@@ -1,5 +1,4 @@
 import litellm.types.utils as litellm_utils
-
 from litellm.types.llms.openai import ChatCompletionReasoningSummaryTextBlock
 
 from rdagent.oai.backend.litellm import LiteLLMAPIBackend
@@ -22,6 +21,8 @@ litellm_utils.Delta.model_rebuild(
             ChatCompletionReasoningSummaryTextBlock,
     },
 )
+
+
 class OllamaAPIBackend(LiteLLMAPIBackend):
     """Backend local Ollama baseado na implementação original do RD-Agent."""
     pass

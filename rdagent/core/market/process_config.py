@@ -1,5 +1,5 @@
-import json
 from dataclasses import dataclass
+import json
 from typing import Mapping
 
 from rdagent.core.market.context import MarketContext

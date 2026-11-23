@@ -7,8 +7,7 @@ from rdagent.oai.backend.litellm import LiteLLMAPIBackend
 litellm_utils.Message.model_rebuild(
     force=True,
     _types_namespace={
-        "ChatCompletionReasoningSummaryTextBlock":
-            ChatCompletionReasoningSummaryTextBlock,
+        "ChatCompletionReasoningSummaryTextBlock": ChatCompletionReasoningSummaryTextBlock,
     },
 )
 
@@ -24,4 +23,5 @@ litellm_utils.Delta.model_rebuild(
 
 class OllamaAPIBackend(LiteLLMAPIBackend):
     """Backend local Ollama baseado na implementação original do RD-Agent."""
+
     pass

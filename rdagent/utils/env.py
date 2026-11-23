@@ -13,6 +13,7 @@ import os
 import re
 import select
 import shutil
+import sys
 import subprocess
 import time
 import uuid
@@ -844,7 +845,15 @@ class DockerConf(EnvConf):
             ]
         return self
 
+class QlibLocalConf(LocalConf):
+    default_entry: str = "qrun conf.yaml"
+    enable_cache: bool = False
+    bin_path: str = f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}"
 
+
+class QlibLocalEnv(LocalEnv[QlibLocalConf]):
+    """Qlib environment using the active Python virtual environment."""
+    pass
 class QlibCondaConf(CondaConf):
     conda_env_name: str = "rdagent4qlib"
     enable_cache: bool = False

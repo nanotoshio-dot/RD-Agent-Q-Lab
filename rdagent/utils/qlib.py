@@ -1,5 +1,5 @@
 from rdagent.core.experiment import FBWorkspace
-from rdagent.utils.env import QlibCondaConf, QlibCondaEnv
+from rdagent.utils.env import QlibCondaConf, QlibCondaEnv, QlibLocalConf, QlibLocalEnv
 
 ALPHA20 = {
     "RESI5": "Resi($close, 5)/$close",
@@ -199,7 +199,11 @@ df = D.features(["SH600000"], expressions, start_time="2008-01-01", end_time="20
 def validate_qlib_features(expressions: list[str]) -> bool:
     _TFW.inject_files(**{"test_fea.py": TEST_FEATURE_CODE.format(experessions=str(expressions))})
 
-    qlib_env = QlibCondaEnv(conf=QlibCondaConf())
+    import os
+    if os.getenv("MODEL_CoSTEER_ENV_TYPE", "conda") == "local":
+        qlib_env = QlibLocalEnv(conf=QlibLocalConf())
+    else:
+        qlib_env = QlibCondaEnv(conf=QlibCondaConf())
     qlib_env.prepare()
     res = _TFW.run(
         env=qlib_env,

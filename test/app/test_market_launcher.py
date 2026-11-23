@@ -103,16 +103,26 @@ def test_launcher_defaults_to_validation_only(tmp_path, capsys, monkeypatch):
         pytest.fail("Research loop must not start without --execute")
 
     monkeypatch.setattr("rdagent.app.market_launcher.subprocess.run", unexpected_run)
-    result = main([
-        "--market", "china",
-        "--provider-uri", str(tmp_path / "cn_data"),
-        "--train-start", "2010-01-01",
-        "--train-end", "2017-12-31",
-        "--valid-start", "2018-01-01",
-        "--valid-end", "2019-12-31",
-        "--test-start", "2020-01-01",
-        "--test-end", "2021-12-31",
-    ])
+    result = main(
+        [
+            "--market",
+            "china",
+            "--provider-uri",
+            str(tmp_path / "cn_data"),
+            "--train-start",
+            "2010-01-01",
+            "--train-end",
+            "2017-12-31",
+            "--valid-start",
+            "2018-01-01",
+            "--valid-end",
+            "2019-12-31",
+            "--test-start",
+            "2020-01-01",
+            "--test-end",
+            "2021-12-31",
+        ]
+    )
 
     output = capsys.readouterr().out
     assert result == 0

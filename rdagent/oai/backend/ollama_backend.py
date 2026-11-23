@@ -3,7 +3,6 @@ from litellm.types.llms.openai import ChatCompletionReasoningSummaryTextBlock
 
 from rdagent.oai.backend.litellm import LiteLLMAPIBackend
 
-
 # Corrige a referência Pydantic ausente no LiteLLM 1.97.0.
 litellm_utils.Message.model_rebuild(
     force=True,

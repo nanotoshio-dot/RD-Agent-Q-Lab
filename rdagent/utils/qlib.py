@@ -200,6 +200,7 @@ def validate_qlib_features(expressions: list[str]) -> bool:
     _TFW.inject_files(**{"test_fea.py": TEST_FEATURE_CODE.format(experessions=str(expressions))})
 
     import os
+
     if os.getenv("MODEL_CoSTEER_ENV_TYPE", "conda") == "local":
         qlib_env = QlibLocalEnv(conf=QlibLocalConf())
     else:

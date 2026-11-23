@@ -1,7 +1,6 @@
-from litellm.types.llms.openai import (
-    ChatCompletionReasoningSummaryTextBlock,
-)
 import litellm.types.utils as litellm_utils
+
+from litellm.types.llms.openai import ChatCompletionReasoningSummaryTextBlock
 
 from rdagent.oai.backend.litellm import LiteLLMAPIBackend
 

@@ -13,9 +13,9 @@ class MarketProcessConfig:
 
     def __post_init__(self) -> None:
         if not isinstance(self.context, MarketContext):
-            raise TypeError("context must be a MarketContext")
+            raise TypeError("context must be a MarketContext")  # noqa: EM101, TRY003
         if not self.model_env_type.strip() or not self.factor_python_bin.strip():
-            raise ValueError("Environment settings cannot be empty")
+            raise ValueError("Environment settings cannot be empty")  # noqa: EM101, TRY003
 
     def build_env(self, base_env: Mapping[str, str] | None = None) -> dict[str, str]:
         ctx = self.context

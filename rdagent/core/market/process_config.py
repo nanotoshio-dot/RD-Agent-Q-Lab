@@ -1,6 +1,6 @@
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 from rdagent.core.market.context import MarketContext
 

@@ -11,6 +11,8 @@ class MarketContext:
     provider_uri: Path
     region: str
     currency: str
+    qlib_market: str
+    benchmark: str
     universe: tuple[str, ...]
 
     workspace_path: Path
@@ -30,6 +32,8 @@ class MarketContext:
             "market_id": self.market_id,
             "region": self.region,
             "currency": self.currency,
+            "qlib_market": self.qlib_market,
+            "benchmark": self.benchmark,
         }
 
         for field_name, value in required_strings.items():

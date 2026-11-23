@@ -15,8 +15,7 @@ litellm_utils.Message.model_rebuild(
 litellm_utils.Delta.model_rebuild(
     force=True,
     _types_namespace={
-        "ChatCompletionReasoningSummaryTextBlock":
-            ChatCompletionReasoningSummaryTextBlock,
+        "ChatCompletionReasoningSummaryTextBlock": ChatCompletionReasoningSummaryTextBlock,
     },
 )
 

@@ -89,7 +89,7 @@ class MarketContext:
             self.train_end < self.valid_start
             and self.valid_end < self.test_start
         ):
-            raise ValueError(
+            raise ValueError(  # noqa: EM101, TRY003
                 "Training, validation and test periods must be chronological "
                 "and non-overlapping"
-            )  # noqa: EM101, TRY003
+            )

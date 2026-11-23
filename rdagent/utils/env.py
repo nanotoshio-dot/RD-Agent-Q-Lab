@@ -13,8 +13,8 @@ import os
 import re
 import select
 import shutil
-import sys
 import subprocess
+import sys
 import time
 import uuid
 import zipfile

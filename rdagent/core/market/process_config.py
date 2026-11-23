@@ -57,7 +57,6 @@ class MarketProcessConfig:
                 "RD_MARKET_CALENDAR": str(ctx.calendar),
                 "RD_MARKET_MEMORY_PATH": str(ctx.memory_path),
                 "RD_MARKET_CACHE_PATH": str(ctx.cache_path),
-
             }
         )
         return env

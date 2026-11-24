@@ -79,3 +79,33 @@ def test_only_members_after_the_cutover_are_downloaded_plus_benchmarks():
     ]
 
     assert symbols_to_download(spans, since="2020-11-10") == sorted({"AAPL", "TWTR", *BENCHMARKS})
+
+
+def test_missing_china_only_module_is_replaced_by_a_loud_stand_in():
+    import inspect
+    import sys
+
+    from rdagent.app.us_market_data import stub_missing_module
+
+    name = "baostock_absent_for_test"
+    try:
+        stub_missing_module(name)
+        module = __import__(name)
+
+        with pytest.raises(ImportError, match="only used for China data"):
+            module.login()
+        # Introspection must keep working while the stand-in is loaded.
+        assert not hasattr(module, "__file__")
+        assert inspect.getmodule(test_installed_modules_are_never_replaced) is sys.modules[__name__]
+    finally:
+        sys.modules.pop(name, None)
+
+
+def test_installed_modules_are_never_replaced():
+    import json
+
+    from rdagent.app.us_market_data import stub_missing_module
+
+    stub_missing_module("json")
+
+    assert __import__("json") is json

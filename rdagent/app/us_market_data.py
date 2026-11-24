@@ -21,6 +21,7 @@ import json
 import shutil
 import sys
 import time
+import types
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
@@ -140,15 +141,62 @@ def fetch_ndx_members(day: str, cache_dir: Path) -> set[str]:
     return set(symbols)
 
 
+def stub_missing_module(name: str) -> None:
+    """Register an empty stand-in for a module imported at module level but unused on the US path.
+
+    The collector's utils import baostock (China data only) unconditionally. If code ever touches the
+    stand-in, it raises a clear ImportError instead of failing silently.
+    """
+    if name in sys.modules or importlib.util.find_spec(name) is not None:
+        return
+    stub = types.ModuleType(name)
+
+    def missing(attribute: str) -> None:
+        # Introspection (inspect.getmodule, pickle) probes dunder names; answer those like a normal module.
+        if attribute.startswith("__"):
+            raise AttributeError(attribute)
+        raise ImportError(f"{name}.{attribute} is only used for China data and {name} is not installed")
+
+    stub.__getattr__ = missing
+    sys.modules[name] = stub
+
+
 def load_yahoo_collector():  # noqa: ANN201 - module object from a file outside the package
     path = QLIB_SCRIPTS / "data_collector" / "yahoo" / "collector.py"
     if not path.exists():
         raise SystemExit(f"Qlib collector not found at {path}; clone microsoft/qlib into {QLIB_SCRIPTS.parent}")
+    stub_missing_module("baostock")
     sys.path[:0] = [str(QLIB_SCRIPTS), str(QLIB_SCRIPTS / "data_collector")]
-    spec = importlib.util.spec_from_file_location("qlib_yahoo_collector", path)
+    # Qlib's BaseRun re-imports its own module by the name "collector" (it is meant to run from its folder),
+    # so register it under that name: BaseRun then finds this object, with our symbol list patched in.
+    spec = importlib.util.spec_from_file_location("collector", path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules["collector"] = module
     spec.loader.exec_module(module)
     return module
+
+
+def normalize_extend_in_process(collector, runner, old_provider: Path) -> None:  # noqa: ANN001 - Qlib objects
+    """Do what Run.normalize_data_1d_extend does, without its process pool.
+
+    The pool pickles the normalizer, which holds the whole old provider in memory, once per file: about
+    6 s per symbol on one worker, and a full copy of the old data per extra worker. Calling the same
+    per-file step here loads the old data once.
+    """
+    normalizer = collector.Normalize(
+        source_dir=runner.source_dir,
+        target_dir=runner.normalize_dir,
+        normalize_class=getattr(collector, f"{runner.normalize_class_name}Extend"),
+        max_workers=1,
+        date_field_name="date",
+        symbol_field_name="symbol",
+        old_qlib_data_dir=str(old_provider),
+    )
+    files = sorted(Path(runner.source_dir).glob("*.csv"))
+    for done, path in enumerate(files, start=1):
+        normalizer._executor(path)  # noqa: SLF001 - the per-file step of Normalize.normalize
+        if done % 100 == 0 or done == len(files):
+            print(f"normalized {done}/{len(files)}", flush=True)
 
 
 def build(source: Path, target: Path, end: str, delay: float) -> None:
@@ -190,7 +238,7 @@ def build(source: Path, target: Path, end: str, delay: float) -> None:
     )
     start = (pd.Timestamp(cutover) - pd.Timedelta(days=1)).date().isoformat()
     runner.download_data(delay=delay, start=start, end=(pd.Timestamp(end) + pd.Timedelta(days=1)).date().isoformat())
-    runner.normalize_data_1d_extend(str(target))
+    normalize_extend_in_process(collector, runner, target)
     from dump_bin import (  # noqa: PLC0415 - lives in the Qlib scripts folder
         DumpDataUpdate,
     )

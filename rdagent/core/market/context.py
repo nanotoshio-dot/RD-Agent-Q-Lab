@@ -93,8 +93,8 @@ class MarketContext:
 
     def _validate_period_order(self) -> None:
         if not (self.train_end < self.valid_start and self.valid_end < self.test_start):
-            message = "Training, validation and test periods must be chronological " "and non-overlapping"
-            raise ValueError(message)  # noqa: TRY003
+            message = "Training, validation and test periods must be chronological and non-overlapping"
+            raise ValueError(message)
 
     def _validate_trading_rules(self) -> None:
         if self.trading_rules is None:

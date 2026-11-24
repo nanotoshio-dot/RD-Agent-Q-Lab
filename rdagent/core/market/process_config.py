@@ -90,7 +90,7 @@ class MarketProcessConfig:
                 "RD_MARKET_CALENDAR": str(ctx.calendar),
                 "RD_MARKET_MEMORY_PATH": str(ctx.memory_path),
                 "RD_MARKET_CACHE_PATH": str(ctx.cache_path),
-            }
+            },
         )
         if ctx.trading_rules is not None:
             env.update(ctx.trading_rules.to_env())

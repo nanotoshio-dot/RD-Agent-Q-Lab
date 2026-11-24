@@ -43,19 +43,19 @@ port_analysis_config: &port_analysis_config
         module_path: qlib.contrib.strategy
         kwargs:
             signal: <PRED>
-            topk: 50
-            n_drop: 5
+            topk: {{ RD_MARKET_TOPK | default("50", true) }}
+            n_drop: {{ RD_MARKET_N_DROP | default("5", true) }}
     backtest:
         start_time: {{ test_start | default("2017-01-01", true) }}
         end_time: {{ test_end | default("null", true) }}
         account: 100000000
         benchmark: *benchmark
         exchange_kwargs:
-            limit_threshold: 0.095
+            limit_threshold: {{ RD_MARKET_LIMIT_THRESHOLD | default("0.095", true) }}
             deal_price: close
-            open_cost: 0.0005
-            close_cost: 0.0015
-            min_cost: 5
+            open_cost: {{ RD_MARKET_OPEN_COST | default("0.0005", true) }}
+            close_cost: {{ RD_MARKET_CLOSE_COST | default("0.0015", true) }}
+            min_cost: {{ RD_MARKET_MIN_COST | default("5", true) }}
 task:
     model:
         class: GeneralPTNN

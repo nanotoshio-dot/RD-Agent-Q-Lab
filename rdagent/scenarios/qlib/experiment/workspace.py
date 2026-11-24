@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -6,6 +7,10 @@ import pandas as pd
 
 from rdagent.components.coder.model_coder.conf import MODEL_COSTEER_SETTINGS
 from rdagent.core.experiment import FBWorkspace
+from rdagent.core.market.runtime import (
+    current_market_id,
+    ensure_docker_supports_market,
+)
 from rdagent.log import rdagent_logger as logger
 from rdagent.utils.env import (
     QlibCondaConf,
@@ -23,6 +28,8 @@ class QlibFBWorkspace(FBWorkspace):
 
     def execute(self, qlib_config_name: str = "conf.yaml", run_env: dict = {}, *args, **kwargs) -> str:
         if MODEL_COSTEER_SETTINGS.env_type == "docker":
+            # The container gets none of the market variables, so its templates would render China.
+            ensure_docker_supports_market(current_market_id(), os.environ.get("RD_MARKET_PROVIDER_URI"))
             qtde = QTDockerEnv()
         elif MODEL_COSTEER_SETTINGS.env_type == "conda":
             qtde = QlibCondaEnv(conf=QlibCondaConf())

@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from rdagent.core.market import MarketContext, MarketProcessConfig
+from rdagent.core.market import MarketContext, MarketProcessConfig, TradingRules
+from rdagent.core.market.trading_rules import TRADING_RULE_ENV_KEYS
+
+pytestmark = pytest.mark.offline
+
+US_RULES = TradingRules(limit_threshold=None, open_cost=0.001, close_cost=0.001, min_cost=1, topk=50, n_drop=5)
 
 
 def make_context(**overrides):
@@ -72,7 +77,9 @@ def test_market_process_config_builds_isolated_environment():
 
     assert env["EXISTING_SETTING"] == "keep-me"
     assert env["WORKSPACE_PATH"] == "/work/us-sp500"
-    assert env["PICKLE_CACHE_FOLDER_PATH_STR"] == "/cache/us-sp500"
+    assert Path(env["PICKLE_CACHE_FOLDER_PATH_STR"]).parent == Path("/cache/us-sp500")
+    assert Path(env["FACTOR_CoSTEER_DATA_FOLDER"]).parent == Path("/work/us-sp500")
+    assert Path(env["FACTOR_CoSTEER_DATA_FOLDER_DEBUG"]).parent == Path("/work/us-sp500")
     assert env["RD_MARKET_ID"] == "us-sp500"
     assert env["RD_MARKET_PROVIDER_URI"] == "/data/us"
     assert env["RD_MARKET_BENCHMARK"] == "^GSPC"
@@ -94,3 +101,72 @@ def test_market_process_config_does_not_mutate_base_environment():
 def test_market_process_config_rejects_wrong_context_type():
     with pytest.raises(TypeError, match="context must be a MarketContext"):
         MarketProcessConfig(context=object())
+
+
+def test_market_context_rejects_rules_of_the_wrong_type():
+    with pytest.raises(TypeError, match="trading_rules"):
+        make_context(trading_rules={"topk": 50})
+
+
+def test_no_price_limit_is_only_accepted_in_region_us():
+    # Qlib replaces a null limit with the region default (0.095 for cn), so null means "no limit" only in us.
+    with pytest.raises(ValueError, match="region us"):
+        make_context(region="cn", trading_rules=US_RULES)
+
+
+def test_trading_rules_reach_the_environment():
+    env = MarketProcessConfig(context=make_context(trading_rules=US_RULES)).build_env({})
+
+    assert {key: env[key] for key in TRADING_RULE_ENV_KEYS} == US_RULES.to_env()
+
+
+def test_context_without_rules_drops_stale_rule_variables():
+    stale = {"RD_MARKET_TOPK": "20", "RD_MARKET_OPEN_COST": "0.001"}
+
+    env = MarketProcessConfig(context=make_context()).build_env(stale)
+
+    assert not set(TRADING_RULE_ENV_KEYS) & set(env)
+
+
+def test_cache_folder_changes_with_the_research_configuration():
+    def cache_folder(context):
+        return MarketProcessConfig(context=context).build_env({})["PICKLE_CACHE_FOLDER_PATH_STR"]
+
+    base = cache_folder(make_context())
+    variants = {
+        cache_folder(make_context(test_end=date(2022, 6, 30))),
+        cache_folder(make_context(trading_rules=US_RULES)),
+        cache_folder(make_context(benchmark="^NDX")),
+        cache_folder(make_context(provider_uri=Path("/data/us-2026"))),
+    }
+
+    assert cache_folder(make_context()) == base
+    assert base not in variants
+    assert len(variants) == 4
+
+
+def test_factor_data_folder_changes_when_the_provider_is_updated_in_place(tmp_path):
+    calendar = tmp_path / "us" / "calendars" / "day.txt"
+    calendar.parent.mkdir(parents=True)
+
+    def data_folder():
+        context = make_context(provider_uri=tmp_path / "us", calendar=calendar)
+        return MarketProcessConfig(context=context).build_env({})["FACTOR_CoSTEER_DATA_FOLDER"]
+
+    calendar.write_text("2020-11-09\n2020-11-10\n")
+    before = data_folder()
+    calendar.write_text("2020-11-09\n2020-11-10\n2020-11-11\n")
+
+    assert data_folder() != before
+
+
+def test_factor_data_folder_follows_the_provider_but_not_the_dates():
+    def data_folders(context):
+        env = MarketProcessConfig(context=context).build_env({})
+        return env["FACTOR_CoSTEER_DATA_FOLDER"], env["FACTOR_CoSTEER_DATA_FOLDER_DEBUG"]
+
+    base = data_folders(make_context())
+
+    assert data_folders(make_context(test_end=date(2022, 6, 30), trading_rules=US_RULES)) == base
+    assert data_folders(make_context(provider_uri=Path("/data/us-2026"))) != base
+    assert base[0] != base[1]

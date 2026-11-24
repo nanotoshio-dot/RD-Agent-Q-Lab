@@ -12,6 +12,26 @@ from rdagent.scenarios.qlib.proposal.bandit import (
 )
 from rdagent.utils.agent.tpl import T
 
+# Sample counts measured for CSI300 with the default dates. Other markets and splits differ,
+# so they get no fixed numbers.
+CHINA_MODEL_SIZE_HINT = (
+    "The training data consists of approximately 478,000 samples for the training set and about 128,000 samples "
+    "for the validation set. Please design the hyperparameters accordingly and control the model size."
+)
+GENERIC_MODEL_SIZE_HINT = "Please design the hyperparameters for this dataset and control the model size."
+
+
+def build_model_action_rag(scen: object) -> str:
+    size_hint = CHINA_MODEL_SIZE_HINT if getattr(scen, "market_prompt_note", None) is None else GENERIC_MODEL_SIZE_HINT
+    return (
+        "1. In Quantitative Finance, market data could be time-series, and GRU model/LSTM model are suitable for them. "
+        "Do not generate GNN model as for now.\n2. "
+        + size_hint
+        + " This has a significant impact on the training results. If you believe that the previous model itself is "
+        "good but the training hyperparameters or model hyperparameters are not optimal, you can return the same "
+        "model and adjust these parameters instead.\n"
+    )
+
 
 class QuantTrace(Trace):
     def __init__(self, scen: Scenario) -> None:
@@ -94,7 +114,7 @@ class QlibQuantHypothesisGen(FactorAndModelHypothesisGen):
             else:
                 qaunt_rag = "Now, you need to try factors that can achieve high IC (e.g., machine learning-based factors)! Do not include factors that are similar to those in the SOTA factor library!"
         elif action == "model":
-            qaunt_rag = "1. In Quantitative Finance, market data could be time-series, and GRU model/LSTM model are suitable for them. Do not generate GNN model as for now.\n2. The training data consists of approximately 478,000 samples for the training set and about 128,000 samples for the validation set. Please design the hyperparameters accordingly and control the model size. This has a significant impact on the training results. If you believe that the previous model itself is good but the training hyperparameters or model hyperparameters are not optimal, you can return the same model and adjust these parameters instead.\n"
+            qaunt_rag = build_model_action_rag(self.scen)
 
         if len(trace.hist) == 0:
             hypothesis_and_feedback = "No previous hypothesis and feedback available since it's the first round."

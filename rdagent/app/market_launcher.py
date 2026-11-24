@@ -15,7 +15,13 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from rdagent.core.market import MarketContext, MarketProcessConfig
+from dotenv import dotenv_values
+
+from rdagent.core.market import MarketContext, MarketProcessConfig, TradingRules
+from rdagent.core.market.runtime import ensure_docker_supports_market
+
+# First day of the factor data built by factor_data_template/generate.py; keep the two in sync.
+FACTOR_DATA_START = date(2008, 12, 29)
 
 
 @dataclass(frozen=True)
@@ -26,7 +32,12 @@ class MarketProfile:
     qlib_market: str
     benchmark: str
     universe: tuple[str, ...]
+    trading_rules: TradingRules
 
+
+# US costs are an assumption (10 bps per side, covering fees, spread and impact for the template's
+# large account); China keeps the values the Qlib templates always used.
+US_COST = {"open_cost": 0.001, "close_cost": 0.001, "min_cost": 1}
 
 MARKET_PROFILES: dict[str, MarketProfile] = {
     "china": MarketProfile(
@@ -36,6 +47,9 @@ MARKET_PROFILES: dict[str, MarketProfile] = {
         qlib_market="csi300",
         benchmark="SH000300",
         universe=("csi300",),
+        trading_rules=TradingRules(
+            limit_threshold=0.095, open_cost=0.0005, close_cost=0.0015, min_cost=5, topk=50, n_drop=5
+        ),
     ),
     "us-sp500": MarketProfile(
         market_id="us-sp500",
@@ -44,6 +58,7 @@ MARKET_PROFILES: dict[str, MarketProfile] = {
         qlib_market="sp500",
         benchmark="^GSPC",
         universe=("sp500",),
+        trading_rules=TradingRules(limit_threshold=None, topk=50, n_drop=5, **US_COST),
     ),
     "us-nasdaq100": MarketProfile(
         market_id="us-nasdaq100",
@@ -52,6 +67,8 @@ MARKET_PROFILES: dict[str, MarketProfile] = {
         qlib_market="nasdaq100",
         benchmark="^NDX",
         universe=("nasdaq100",),
+        # About 20% of the index, close to China's 50 of 300; topk 50 would mostly track the index.
+        trading_rules=TradingRules(limit_threshold=None, topk=20, n_drop=2, **US_COST),
     ),
 }
 
@@ -75,9 +92,11 @@ def build_market_context(
         raise ValueError(f"Unknown market {market_id!r}. Choose one of: {choices}") from exc
 
     market_root = (root or Path.home() / ".rdagent" / "markets") / market_id
+    # Absolute, because generate.py and qrun read the provider from other working directories.
+    provider_uri = provider_uri.expanduser().absolute()
     return MarketContext(
         market_id=profile.market_id,
-        provider_uri=provider_uri.expanduser(),
+        provider_uri=provider_uri,
         region=profile.region,
         currency=profile.currency,
         qlib_market=profile.qlib_market,
@@ -86,14 +105,39 @@ def build_market_context(
         workspace_path=market_root / "workspace",
         cache_path=market_root / "cache",
         memory_path=market_root / "memory",
-        calendar=provider_uri.expanduser() / "calendars" / "day.txt",
+        calendar=provider_uri / "calendars" / "day.txt",
         train_start=train_start,
         train_end=train_end,
         valid_start=valid_start,
         valid_end=valid_end,
         test_start=test_start,
         test_end=test_end,
+        trading_rules=profile.trading_rules,
     )
+
+
+def validate_research_dates(context: MarketContext) -> None:
+    """Reject dates that the factor data or the provider calendar cannot serve."""
+    if context.train_start < FACTOR_DATA_START:
+        message = f"--train-start must be on or after {FACTOR_DATA_START}: factor data starts there"
+        raise ValueError(message)
+    if not context.calendar.is_file():
+        return
+    days = context.calendar.read_text().split()
+    first_day, last_day = date.fromisoformat(days[0]), date.fromisoformat(days[-1])
+    if context.train_start < first_day:
+        message = f"--train-start must be on or after {first_day}, the first day in {context.calendar}"
+        raise ValueError(message)
+    if context.test_end > last_day:
+        message = f"--test-end must be on or before {last_day}, the last day in {context.calendar}"
+        raise ValueError(message)
+    # The backtest reads the trading day after test_end from the future calendar, or from day.txt without one.
+    future_calendar = context.calendar.parent / "day_future.txt"
+    next_day_source = future_calendar if future_calendar.is_file() else context.calendar
+    next_day_limit = date.fromisoformat(next_day_source.read_text().split()[-1])
+    if context.test_end >= next_day_limit:
+        message = f"--test-end must be before {next_day_limit}, the last day in {next_day_source}"
+        raise ValueError(message)
 
 
 def build_child_environment(
@@ -103,6 +147,8 @@ def build_child_environment(
     factor_python_bin: str = sys.executable,
 ) -> dict[str, str]:
     """Return a child-only environment without mutating the parent process."""
+    if context.trading_rules is None:
+        raise ValueError("Market context has no trading rules")
     env = MarketProcessConfig(
         context=context,
         model_env_type=model_env_type,
@@ -112,7 +158,19 @@ def build_child_environment(
     log_path = context.memory_path.parent / "log"
     env["LOG_TRACE_PATH"] = str(log_path)
     env["STEP_SEMAPHORE"] = "1"
+    # Qlib records experiments in ./mlruns, a file store that MLflow 3 refuses unless allowed.
+    env.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
     return env
+
+
+def load_base_environment(dotenv_path: str | Path = ".env") -> dict[str, str]:
+    """Return .env values overlaid by the process environment, without mutating it.
+
+    The child reads its LLM settings at import time, before anything else loads
+    .env, so they must already be in its environment.
+    """
+    file_values = {key: value for key, value in dotenv_values(dotenv_path).items() if value is not None}
+    return {**file_values, **os.environ}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -148,7 +206,13 @@ def main(argv: list[str] | None = None) -> int:
         test_end=args.test_end,
         root=args.root,
     )
-    child_env = build_child_environment(context, model_env_type=args.model_env)
+    try:
+        validate_research_dates(context)
+        if args.model_env == "docker":
+            ensure_docker_supports_market(context.market_id, str(context.provider_uri))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    child_env = build_child_environment(context, base_env=load_base_environment(), model_env_type=args.model_env)
     command = [
         sys.executable,
         "-m",
@@ -161,8 +225,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Provider: {context.provider_uri}")
     print(f"Universe: {', '.join(context.universe)}")
     print(f"Benchmark: {context.benchmark}")
+    print(f"Trading rules: {context.trading_rules}")
     print(f"Workspace: {context.workspace_path}")
-    print(f"Cache: {context.cache_path}")
+    print(f"Factor data: {child_env['FACTOR_CoSTEER_DATA_FOLDER']}")
+    print(f"Cache: {child_env['PICKLE_CACHE_FOLDER_PATH_STR']}")
     print(f"Memory: {context.memory_path}")
     print(f"Calendar: {context.calendar}")
     print(f"Command: {' '.join(command)}")

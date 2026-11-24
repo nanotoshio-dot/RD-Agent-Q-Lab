@@ -1,53 +1,105 @@
+import os
 import random
 import re
 import shutil
+import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 import pandas as pd
 from jinja2 import Environment, StrictUndefined
 
 from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
-from rdagent.utils.env import QTDockerEnv
+from rdagent.components.coder.model_coder.conf import MODEL_COSTEER_SETTINGS
+from rdagent.core.market.runtime import (
+    current_market_id,
+    ensure_docker_supports_market,
+)
+from rdagent.utils.agent.tpl import T
+from rdagent.utils.env import (
+    CondaConf,
+    Env,
+    QlibCondaConf,
+    QlibCondaEnv,
+    QlibDockerConf,
+    QlibLocalConf,
+    QlibLocalEnv,
+    QTDockerEnv,
+)
+
+FACTOR_DATA_TEMPLATE = Path(__file__).parent / "factor_data_template"
+
+
+def _factor_data_env() -> Env:
+    """Pick where generate.py runs.
+
+    Plain RD-Agent runs keep the upstream Docker generation. Market runs use the execution
+    environment of the models, because the Docker container would build the default China data.
+    """
+    market_id = current_market_id()
+    if market_id is None:
+        return QTDockerEnv()
+    env_type = MODEL_COSTEER_SETTINGS.env_type
+    if env_type == "local":
+        return QlibLocalEnv(conf=QlibLocalConf())
+    if env_type == "conda":
+        return QlibCondaEnv(conf=QlibCondaConf())
+    if env_type == "docker":
+        ensure_docker_supports_market(market_id, os.environ.get("RD_MARKET_PROVIDER_URI"))
+        return QTDockerEnv(conf=QlibDockerConf())
+    raise ValueError(f"Unknown env_type: {env_type}")
 
 
 def generate_data_folder_from_qlib():
-    template_path = Path(__file__).parent / "factor_data_template"
-    qtde = QTDockerEnv()
-    qtde.prepare()
+    """Run generate.py in a private build folder, then publish the two data folders.
 
-    # Run the Qlib backtest
-    execute_log = qtde.check_output(
-        local_path=str(template_path),
-        entry=f"python generate.py",
-    )
+    Nothing is written to the template folder, so a failed run cannot leave files behind
+    that a later run, possibly for another market, would publish as its own data.
+    """
+    data_folder = Path(FACTOR_COSTEER_SETTINGS.data_folder)
+    debug_folder = Path(FACTOR_COSTEER_SETTINGS.data_folder_debug)
+    for folder in (data_folder, debug_folder):
+        folder.parent.mkdir(parents=True, exist_ok=True)
+    env = _factor_data_env()
+    env.prepare()
+    # A conda env created by prepare() did not exist when its PATH was read, so read it again.
+    if isinstance(env.conf, CondaConf) and not env.conf.bin_path:
+        env.conf._update_bin_path()
 
-    assert (Path(__file__).parent / "factor_data_template" / "daily_pv_all.h5").exists(), (
-        "daily_pv_all.h5 is not generated. It means rdagent/scenarios/qlib/experiment/factor_data_template/generate.py is not executed correctly. Please check the log: \n"
-        + execute_log
-    )
-    assert (Path(__file__).parent / "factor_data_template" / "daily_pv_debug.h5").exists(), (
-        "daily_pv_debug.h5 is not generated. It means rdagent/scenarios/qlib/experiment/factor_data_template/generate.py is not executed correctly. Please check the log: \n"
-        + execute_log
-    )
+    with tempfile.TemporaryDirectory(prefix=".factor_data_build_", dir=data_folder.parent) as build_dir:
+        build = Path(build_dir)
+        shutil.copy(FACTOR_DATA_TEMPLATE / "generate.py", build / "generate.py")
+        result = env.run(entry="python generate.py", local_path=str(build))
+        outputs = {data_folder: build / "daily_pv_all.h5", debug_folder: build / "daily_pv_debug.h5"}
+        if result.exit_code != 0 or not all(path.is_file() for path in outputs.values()):
+            # full_stdout, not stdout: stdout asks the LLM to filter the log.
+            log_tail = result.full_stdout[-5000:]
+            raise RuntimeError(f"Factor data generation failed (exit code {result.exit_code}). Log tail:\n{log_tail}")
 
-    Path(FACTOR_COSTEER_SETTINGS.data_folder).mkdir(parents=True, exist_ok=True)
-    shutil.copy(
-        Path(__file__).parent / "factor_data_template" / "daily_pv_all.h5",
-        Path(FACTOR_COSTEER_SETTINGS.data_folder) / "daily_pv.h5",
-    )
-    shutil.copy(
-        Path(__file__).parent / "factor_data_template" / "README.md",
-        Path(FACTOR_COSTEER_SETTINGS.data_folder) / "README.md",
-    )
+        for target, output in outputs.items():
+            staged = build / f"publish_{target.name}"
+            staged.mkdir()
+            shutil.move(output, staged / "daily_pv.h5")
+            shutil.copy(FACTOR_DATA_TEMPLATE / "README.md", staged / "README.md")
+            # Remove a leftover from an interrupted run so the move cannot nest or mix folders.
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.move(staged, target)
 
-    Path(FACTOR_COSTEER_SETTINGS.data_folder_debug).mkdir(parents=True, exist_ok=True)
-    shutil.copy(
-        Path(__file__).parent / "factor_data_template" / "daily_pv_debug.h5",
-        Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "daily_pv.h5",
-    )
-    shutil.copy(
-        Path(__file__).parent / "factor_data_template" / "README.md",
-        Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "README.md",
+
+def get_market_prompt_note(env: Mapping[str, str] | None = None) -> str | None:
+    """One line telling the LLM which market it researches, or None where the prompts already fit.
+
+    The prompts were written for China (SH/SZ codes), so cn-region runs get no note and keep
+    their text byte for byte.
+    """
+    env = os.environ if env is None else env
+    if current_market_id(env) is None or env.get("RD_MARKET_REGION", "cn") == "cn":
+        return None
+    return T(".prompts:qlib_market_note").r(
+        region=env["RD_MARKET_REGION"],
+        universe=env["RD_MARKET_QLIB_MARKET"],
+        benchmark=env["RD_MARKET_BENCHMARK"],
     )
 
 

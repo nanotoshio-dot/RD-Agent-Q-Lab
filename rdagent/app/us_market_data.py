@@ -33,6 +33,7 @@ import time
 import types
 import urllib.request
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
@@ -40,6 +41,19 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from pandas.tseries.holiday import (
+    AbstractHolidayCalendar,
+    GoodFriday,
+    Holiday,
+    USLaborDay,
+    USMartinLutherKingJr,
+    USMemorialDay,
+    USPresidentsDay,
+    USThanksgivingDay,
+    nearest_workday,
+    sunday_to_monday,
+)
+from pandas.tseries.offsets import CustomBusinessDay
 
 from rdagent.core.market.process_config import (
     PROVIDER_BUILD_ID,
@@ -91,14 +105,29 @@ OLD_TICKER_DATA_CODE = {
     "SAI": "LDOS",  # SAIC before it became Leidos
     "WYN": "WYND",  # Wyndham Worldwide
 }
-# The old file's IR span is the old Ingersoll Rand, whose prices are under TT. The code IR holds the
-# company that took the name and joined the index on this day.
+# Old-file members whose prices are under another code until a day. GOOG named the class A shares (now
+# GOOGL) until 2014-04-02, and from 2014-03-27 the GOOG code holds the class C shares' prices.
+DATA_CODE_UNTIL = {"GOOG": ("GOOGL", "2014-04-02")}
+# The day each of these old-file spans really starts; an earlier start is another company or share class.
 OLD_SPAN_FIRST_DAYS = {
+    # The old file's IR span is the old Ingersoll Rand, whose prices are under TT. The code IR holds the
+    # company that took the name and joined the index on this day.
     "IR": "2020-03-03",
-    # Under Armour's class A traded as UA until 2016-04-07 and its history is under UAA; UA has named the
-    # class C shares since 2016-04-08. Earlier, the old file counts the company twice.
+    # The old file's PCS span is MetroPCS, a member from this day (the source lists it under TMUS). The
+    # source's own PCS of 1998-2004 is Sprint PCS, another company, with no prices here.
+    "PCS": "2009-06-30",
+    # The code UA holds the class C shares' prices from their first day, 2016-04-08 (they traded as UA.C
+    # until December 2016, when the class A shares, under UAA, gave up the UA ticker). The old file makes
+    # UA a member from 2014-05-01, when the class A shares joined, so it counts the company twice until
+    # then.
     "UA": "2016-04-08",
 }
+# Bars of another security in a code's old bins, from the first day to the last ("" = from the start),
+# written over with NaN, since the factor windows of the code's first member days would read them. UA's
+# are the unadjusted class A shares until 2016-03-22, then thin when-issued class C prints: a fake fall of
+# 51%. GOOG's are when-issued class C prints between its class A history and its own, with volumes of
+# 0.4M-7M against about 255M.
+FOREIGN_BARS = {"GOOG": ("2014-03-27", "2014-04-02"), "UA": ("", "2016-04-07")}
 # The fields of the original provider. Yahoo adds adjclose and dividends, which dump_update would write
 # with the wrong start date for existing instruments.
 FIELDS = ("open", "high", "low", "close", "volume", "factor", "change")
@@ -291,10 +320,20 @@ def bridge_short_gaps(spans: list[Span], calendar: list[str], max_gap: int = 10)
 
 
 def move_to_data_codes(spans: list[Span], calendar: list[str]) -> list[Span]:
-    """Name each old-file member by the code that holds its prices (OLD_TICKER_DATA_CODE)."""
-    return coalesce_spans(
-        [(OLD_TICKER_DATA_CODE.get(symbol, symbol), start, end) for symbol, start, end in spans], calendar
-    )
+    """Name each old-file member by the code that holds its prices (OLD_TICKER_DATA_CODE, DATA_CODE_UNTIL)."""
+    moved = []
+    for symbol, start, end in spans:
+        code = OLD_TICKER_DATA_CODE.get(symbol, symbol)
+        if code not in DATA_CODE_UNTIL:
+            moved.append((code, start, end))
+            continue
+        other, last = DATA_CODE_UNTIL[code]
+        if start <= last:
+            moved.append((other, start, min(end, last)))
+        after = bisect.bisect_right(calendar, last)
+        if after < len(calendar) and max(start, calendar[after]) <= end:
+            moved.append((code, max(start, calendar[after]), end))
+    return coalesce_spans(moved, calendar)
 
 
 def instruments_text(spans: list[Span]) -> str:
@@ -534,11 +573,13 @@ def normalization_calendar(provider: Path, raw_dir: Path) -> list[pd.Timestamp]:
 
     Qlib downloads the whole ^GSPC history from Yahoo for this, once per normalizer, and a slow link times
     it out after the hour of work before it. The provider's calendar and the downloaded ^GSPC file hold
-    the same days.
+    the same days. A row without any price (Yahoo's rows for a corporate action) is not a trading day, but
+    one with a price and no close is: it stays, and the audit then reports the benchmark's missing close.
     """
     days = set((provider / "calendars" / "day.txt").read_text().split())
     frame = read_yahoo_csv(raw_dir / f"{BENCHMARKS[0]}.csv")
-    days.update(frame.index[frame["close"].notna()])
+    prices = [column for column in ("open", "high", "low", "close") if column in frame]
+    days.update(frame.index[frame[prices].notna().any(axis=1)])
     return [pd.Timestamp(day) for day in sorted(days)]
 
 
@@ -681,8 +722,29 @@ def resume_cutover(target: Path) -> str:
     return cutover
 
 
+class NYSEHolidays(AbstractHolidayCalendar):
+    """The NYSE's regular holidays. Unscheduled closures (2001-09-11, 2012-10-29, 2025-01-09) are not in it."""
+
+    rules = [  # noqa: RUF012 - pandas reads the class attribute
+        Holiday("New Year's Day", month=1, day=1, observance=sunday_to_monday),
+        USMartinLutherKingJr,
+        USPresidentsDay,
+        GoodFriday,
+        USMemorialDay,
+        Holiday("Juneteenth", month=6, day=19, start_date="2022-01-01", observance=nearest_workday),
+        Holiday("Independence Day", month=7, day=4, observance=nearest_workday),
+        USLaborDay,
+        USThanksgivingDay,
+        Holiday("Christmas", month=12, day=25, observance=nearest_workday),
+    ]
+
+
+TRADING_DAY = CustomBusinessDay(calendar=NYSEHolidays())
+
+
 def last_business_day(day: str) -> str:
-    return pd.bdate_range(end=day, periods=1)[0].date().isoformat()
+    """The last NYSE trading day on or before ``day``: an end on a holiday asks for no bar of that day."""
+    return pd.date_range(end=day, periods=1, freq=TRADING_DAY)[0].date().isoformat()
 
 
 # A raw file up to this many days behind the bulk of the files is taken for a company that still trades
@@ -690,11 +752,16 @@ def last_business_day(day: str) -> str:
 STALE_WINDOW_DAYS = 7
 
 
+def raw_days(path: Path) -> pd.Series:
+    """The days of a raw Yahoo file, as ISO dates."""
+    return pd.read_csv(path, usecols=["date"])["date"].astype(str).str[:10]
+
+
 def raw_last_days(raw_dir: Path) -> dict[str, str]:
     """The last day of each symbol's raw Yahoo file."""
     last = {}
     for path in raw_dir.glob("*.csv"):
-        days = pd.read_csv(path, usecols=["date"])["date"].astype(str).str[:10]
+        days = raw_days(path)
         if len(days):
             last[normalize_ticker(path.stem)] = days.max()
     return last
@@ -753,20 +820,40 @@ def set_aside(raw_dir: Path, symbols: list[str], aside: Path) -> None:
             path.replace(aside / path.name)
 
 
-def restore_unrefreshed(raw_dir: Path, aside: Path) -> list[str]:
-    """Put back the set-aside file of each symbol the download saved nothing for; return those symbols.
+# In the set-aside folder: the names of the files a resumed run put back, which are still stale.
+RESTORED = "restored.txt"
+
+
+def restore_unrefreshed(raw_dir: Path, aside: Path, *, keep: bool = False) -> list[str]:
+    """Put back the set-aside file of each symbol the download saved nothing usable for; return them.
 
     Qlib's collector reports no error for a symbol Yahoo fails on, so without this a rate-limited refresh
-    would lose the data the symbol already had.
+    would lose the data the symbol already had. A download that starts after the old file ends is
+    discarded: it is another security under a reused ticker, or a stub for a delisted one (Yahoo has a
+    single 2026 row for ANSS, delisted in 2025). With ``keep``, as when a run resumes, the folder stays
+    with the names put back and the interrupted run's REFRESH_MARKER, so a run stopped again before its
+    own download still knows them. The call after the download removes the folder.
     """
-    restored = []
+    restored: set[str] = set()
     if aside.is_dir():
+        if keep and (aside / RESTORED).is_file():
+            restored.update((aside / RESTORED).read_text().split())
         for path in sorted(aside.glob("*.csv")):
-            if not (raw_dir / path.name).exists():
-                path.replace(raw_dir / path.name)
-                restored.append(normalize_ticker(path.stem))
-        shutil.rmtree(aside)
-    return restored
+            new = raw_dir / path.name
+            if new.exists():
+                old_days, new_days = raw_days(path), raw_days(new)
+                if len(old_days) and (not len(new_days) or new_days.min() > old_days.max()):
+                    new.unlink()
+            if new.exists():
+                path.unlink()  # replaced by the download
+            else:
+                path.replace(new)
+                restored.add(normalize_ticker(path.stem))
+        if keep:
+            (aside / RESTORED).write_text("".join(f"{symbol}\n" for symbol in sorted(restored)))
+        else:
+            shutil.rmtree(aside)
+    return sorted(restored)
 
 
 UNREFRESHED = "unrefreshed.txt"  # in _sources: symbols a refresh left behind, retried by later runs
@@ -782,37 +869,111 @@ def symbols_to_retry(sources: Path, reuse_raw: Path | None) -> set[str]:
     return found
 
 
-def current_members(*source_spans: list[Span]) -> set[str]:
-    """Symbols that the sources still list as members."""
-    return {symbol for spans in source_spans for symbol, _, end in spans if end == OPEN_END}
+def symbols_needing_data(spans: list[Span], last: dict[str, str]) -> set[str]:
+    """The symbols whose data must reach the end: benchmarks, current members, and members removed later.
 
-
-def check_refresh(raw_dir: Path, stale: list[str], unrefreshed: list[str], current: set[str]) -> None:
-    """Stop before the provider is touched when a refresh left a benchmark or current members behind.
-
-    A symbol that left the index may have left the market too, and Yahoo has nothing more for it. A
-    current member without new data would leave the index early, as would every member if the
-    benchmarks lagged. Unrefreshed symbols are recorded and retried by later runs either way.
+    A member removed more than STALE_WINDOW_DAYS after its raw file ends traded as a member past it, so
+    Yahoo missed its last days. One removed right after its last bar has left the market. A former member
+    without any file is not asked for again: Yahoo had nothing for it.
     """
-    if not stale:
-        return
+    needed = set(BENCHMARKS)
+    for symbol, _, end in spans:
+        if end == OPEN_END:
+            needed.add(symbol)
+        elif symbol in last:
+            if end > (pd.Timestamp(last[symbol]) + pd.Timedelta(days=STALE_WINDOW_DAYS)).date().isoformat():
+                needed.add(symbol)
+    return needed
+
+
+def check_refresh(raw_dir: Path, left_behind: list[str], needed: set[str], end: str) -> None:
+    """Stop before the provider is touched when the raw files leave a benchmark or many members behind.
+
+    ``left_behind`` holds the symbols this run could not refresh or never got a file for. A benchmark
+    must reach the newest raw day up to ``end``, or the normalizer's calendar would end early. A member
+    that needs new data and has none leaves the index early. A few are accepted with a warning: Yahoo
+    misses a symbol now and then, and has nothing for one delisted after the source's last update. Later
+    runs retry them, and the limit counts the needed members, so a run that retries the same few passes as
+    the first did.
+    """
     last = raw_last_days(raw_dir)
-    newest = max(last.values())
-    late = [symbol for symbol in BENCHMARKS if last.get(symbol, "") < newest]
-    members = sorted(set(unrefreshed) & current)
-    if late or len(members) > max(2, len(stale) // 100):  # noqa: PLR2004 - Yahoo misses a symbol now and then
+    wanted = last_business_day(end)
+    newest = max((day for day in last.values() if day <= wanted), default="")
+    late = [symbol for symbol in BENCHMARKS if last.get(symbol, "") < newest or symbol not in last]
+    members = sorted((set(left_behind) & needed) - set(BENCHMARKS))
+    if late or len(members) > max(2, len(needed) // 100):  # noqa: PLR2004 - Yahoo misses a symbol now and then
         raise SystemExit(
-            f"Yahoo refreshed {len(stale) - len(unrefreshed)} of {len(stale)} stale files"
-            + (f" and left the benchmarks {late} behind" if late else "")
-            + (f"; current members without new data: {', '.join(members[:20])}" if members else "")
-            + ". Nothing was changed in the provider. Run the same command again; if the same members"
-            " keep failing, check their tickers."
+            (f"The benchmarks {late} are missing or end before {newest}; " if late else "")
+            + f"{len(members)} members without new data"
+            + (f": {', '.join(members[:20])}" if members else "")
+            + ". Nothing was changed in the provider. Run the same command again; if the same symbols keep"
+            " failing, check their tickers."
         )
     if members:
-        print(f"Warning: current members without new data, retried by the next build: {', '.join(members)}")
+        print(f"Warning: members without new data, retried by the next build: {', '.join(members)}")
+
+
+# In the set-aside folder: the run that left it was refreshing the files to a later end.
+REFRESH_MARKER = "refreshing"
+
+
+def refresh_raw_files(
+    sources: Path,
+    reuse_raw: Path | None,
+    symbols: list[str],
+    spans: list[Span],
+    end: str,
+    download: Callable[[list[str]], object],
+) -> None:
+    """Bring the raw Yahoo files of ``symbols`` in _sources/yahoo_raw up to ``end``.
+
+    An earlier build's files are reused, and ``download`` asks Yahoo for a list of symbols and writes their
+    files. ``spans`` is the source membership, which tells the symbols whose data must reach ``end``. The
+    symbols left behind are recorded in UNREFRESHED and asked for again by later runs; too many of them,
+    or a benchmark, stop the build before the provider is touched.
+    """
+    raw_dir = sources / "yahoo_raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    aside = sources / "yahoo_raw_stale"
+    # An interrupted run left the files it had not replaced yet there; they are still stale.
+    interrupted_refresh = (aside / REFRESH_MARKER).exists()
+    restored = restore_unrefreshed(raw_dir, aside, keep=True)
+    tried: set[str] = set()  # symbols the earlier build already asked Yahoo for, with or without data
+    if reuse_raw is not None:
+        copy_reused_raw(reuse_raw, raw_dir)
+        if (reuse_raw.parent / "symbols.txt").is_file():
+            tried = set((reuse_raw.parent / "symbols.txt").read_text().split())
+    needed = symbols_needing_data(spans, raw_last_days(raw_dir)) & set(symbols)
+    retry = symbols_to_retry(sources, reuse_raw) & needed
+    # A file nobody asks for any more is left alone.
+    stale = sorted((set(stale_raw_files(raw_dir, end)) | set(restored) | retry) & set(symbols))
+    refreshing = interrupted_refresh or usual_last_day(raw_last_days(raw_dir)) < last_business_day(end)
+    set_aside(raw_dir, stale, aside)
+    if refreshing:
+        (aside / REFRESH_MARKER).touch()
+    # A needed symbol without a file is asked for again, even if an earlier build tried it.
+    missing = download_list(symbols, raw_dir, stale, tried - needed, refreshing)
+    print(
+        f"{len(symbols)} symbols, {len(missing)} to download from Yahoo ({len(stale)} stale, "
+        f"{len(tried)} tried by the earlier build)"
+    )
+    if missing:
+        download(missing)
+    unrefreshed = restore_unrefreshed(raw_dir, aside)
+    if unrefreshed:
+        print(f"Yahoo returned nothing usable for {len(unrefreshed)} stale symbols; their earlier files are kept")
+    no_file = [symbol for symbol in needed if not (raw_dir / f"{symbol}.csv").exists()]
+    left_behind = sorted(set(unrefreshed) | set(no_file))
+    (sources / UNREFRESHED).write_text("".join(f"{symbol}\n" for symbol in left_behind))
+    check_refresh(raw_dir, left_behind, needed, end)
+    # Written after the download, so an interrupted one does not mark its symbols as tried for a reuse.
+    (sources / "symbols.txt").write_text("\n".join(sorted(set(symbols) | tried)) + "\n")
 
 
 def build(source: Path, target: Path, end: str, delay: float, reuse_raw: Path | None = None) -> None:
+    if end >= date.today().isoformat():
+        # Qlib's collector refuses to download past today, and today's bar is not final.
+        raise SystemExit(f"--end {end} must be before today")
     sources = target / "_sources"
     if target.exists() and not sources.is_dir():
         raise SystemExit(f"{target} exists and was not created by this tool; choose another --target")
@@ -847,45 +1008,19 @@ def build(source: Path, target: Path, end: str, delay: float, reuse_raw: Path | 
 
     raw_dir = sources / "yahoo_raw"
     raw_dir.mkdir(exist_ok=True)
-    aside = sources / "yahoo_raw_stale"
-    # An interrupted refresh left the files it had not replaced yet there; they are still stale, and so are
-    # the files earlier runs could not refresh.
-    pending = set(restore_unrefreshed(raw_dir, aside)) | symbols_to_retry(sources, reuse_raw)
-    tried: set[str] = set()  # symbols the earlier build already asked Yahoo for, with or without data
-    if reuse_raw is not None:
-        copy_reused_raw(reuse_raw, raw_dir)
-        if (reuse_raw.parent / "symbols.txt").is_file():
-            tried = set((reuse_raw.parent / "symbols.txt").read_text().split())
-    symbols = symbols_to_download(sp500 + ndx_new, since=cutover)
-    # A file nobody asks for any more is left alone.
-    stale = sorted((set(stale_raw_files(raw_dir, end)) | pending) & set(symbols))
-    refreshing = usual_last_day(raw_last_days(raw_dir)) < last_business_day(end)
-    set_aside(raw_dir, stale, aside)
-    missing = download_list(symbols, raw_dir, stale, tried, refreshing)
-    print(
-        f"{len(symbols)} symbols, {len(missing)} to download from Yahoo ({len(stale)} stale, "
-        f"{len(tried)} tried by the earlier build)"
-    )
-
     collector = load_yahoo_collector()
-    collector.YahooCollectorUS.get_instrument_list = lambda self: list(missing)  # replaces Eastmoney and NYSE
     runner = collector.Run(source_dir=str(raw_dir), normalize_dir=str(sources / "yahoo_normalized"), region="US")
     # A week back, so even a Monday cutover has the bar before it that the identity check's return needs.
     start = (pd.Timestamp(cutover) - pd.Timedelta(days=7)).date().isoformat()
-    if missing:
+
+    def download(missing: list[str]) -> None:
+        collector.YahooCollectorUS.get_instrument_list = lambda self: list(missing)  # replaces Eastmoney and NYSE
         runner.download_data(
             delay=delay, start=start, end=(pd.Timestamp(end) + pd.Timedelta(days=1)).date().isoformat()
         )
-    unrefreshed = restore_unrefreshed(raw_dir, aside)
-    (sources / UNREFRESHED).write_text("".join(f"{symbol}\n" for symbol in unrefreshed))
-    if unrefreshed:
-        print(f"Yahoo returned nothing for {len(unrefreshed)} stale symbols; their earlier files are kept")
-    check_refresh(raw_dir, stale, unrefreshed, current_members(sp500, ndx_new))
-    absent = [symbol for symbol in BENCHMARKS if not (raw_dir / f"{symbol}.csv").exists()]
-    if absent:
-        raise SystemExit(f"No Yahoo data for the benchmarks {absent}; run the same command again.")
-    # Written after the download, so an interrupted one does not mark its symbols as tried for a reuse.
-    (sources / "symbols.txt").write_text("\n".join(sorted(set(symbols) | tried)) + "\n")
+
+    symbols = symbols_to_download(sp500 + ndx_new, since=cutover)
+    refresh_raw_files(sources, reuse_raw, symbols, sp500 + ndx_new, end, download)
 
     # Work folders from an interrupted run would mix an old plan into this one.
     for work in ("yahoo_planned", "yahoo_normalized", "yahoo_final"):
@@ -908,6 +1043,9 @@ def build(source: Path, target: Path, end: str, delay: float, reuse_raw: Path | 
     DumpDataUpdate(
         data_path=str(sources / "yahoo_final"), qlib_dir=str(target), include_fields=",".join(FIELDS), max_workers=4
     ).dump()
+    blanked = blank_foreign_bars(target)
+    if blanked:
+        print(f"Bars of another security blanked under {', '.join(blanked)}: {FOREIGN_BARS}")
 
     calendar = (target / "calendars" / "day.txt").read_text().split()
     first_new_day = calendar[bisect.bisect_right(calendar, cutover)]
@@ -944,8 +1082,9 @@ def write_membership(
     """Keep the old file up to the cutover and rebuild membership after it from ``source_spans``.
 
     ``removals`` marks the S&P source: its end dates are removal days, and its start dates replace the
-    old file's placeholder starts. The source membership after the cutover, before members without data
-    are dropped, is kept in _sources for the audit.
+    old file's placeholder starts. The old file's members of every universe are then named by the code
+    that holds their prices. The source membership after the cutover, before members without data are
+    dropped, is kept in _sources for the audit.
     """
     spans = last_member_days(source_spans, calendar) if removals else source_spans
     after = [
@@ -959,7 +1098,8 @@ def write_membership(
     path = provider / "instruments" / f"{universe}.txt"
     old = read_instruments(path)
     if removals:
-        old = move_to_data_codes(replace_placeholder_spans(old, spans, calendar, cutover), calendar)
+        old = replace_placeholder_spans(old, spans, calendar, cutover)
+    old = move_to_data_codes(old, calendar)
     path.write_text(instruments_text(merge_spans(old, after, cutover, first_new_day)))
 
 
@@ -978,6 +1118,31 @@ def misaligned_instruments(provider: Path) -> list[str]:
     return sorted(bad)
 
 
+def blank_foreign_bars(provider: Path) -> list[str]:
+    """Write NaN over the FOREIGN_BARS of each code, in every field.
+
+    The change of the first bar after them is a move against a foreign close, so it is blanked too.
+    Returns the codes that had such bars; a second run finds none.
+    """
+    calendar = (provider / "calendars" / "day.txt").read_text().split()
+    changed = set()
+    for code, (first_day, last_day) in FOREIGN_BARS.items():
+        first = bisect.bisect_left(calendar, first_day) if first_day else 0
+        last = bisect.bisect_right(calendar, last_day) - 1  # calendar positions, both blanked
+        for path in sorted((provider / "features" / code.lower()).glob("*.day.bin")):
+            values = np.fromfile(path, dtype="<f4")
+            if len(values) < 2:  # noqa: PLR2004 - the start index and one bar
+                continue
+            start = int(values[0])
+            stop = last + 1 if path.name == "change.day.bin" else last
+            low, high = max(first - start, 0), min(stop - start, len(values) - 2)  # bar offsets
+            if low <= high and np.isfinite(values[1 + low : 2 + high]).any():
+                values[1 + low : 2 + high] = np.nan
+                values.tofile(path)
+                changed.add(code)
+    return sorted(changed)
+
+
 # An index member's close has moved beyond these in one day only a handful of times (AIG fell 61% on
 # 2008-09-15). Several such moves in one membership mean the stored series is broken: the old provider
 # interleaves two series for some codes (TIE, HNZ, CBE) and has runaway adjustments for others (CHK).
@@ -988,12 +1153,24 @@ IMPOSSIBLE_FALL = -0.5
 # move beyond LARGE_MOVE as well they make fake labels. A share alone would also catch merely stale ones.
 FROZEN_SHARE = 0.15
 LARGE_MOVE = 0.3
+# A sparse foreign series has few bars, far apart, so many of its moves are large: AYE's are 7 of 38 in
+# 2000-2011. A member's moves are beyond LARGE_MOVE about once in a thousand; the highest share among
+# sound spans is SMCI's 2 of 110 in 2024.
+SPARSE_LARGE_MOVES = 3
+SPARSE_LARGE_SHARE = 0.1
+# The templates' label, Ref($close, -2) / Ref($close, -1) - 1, is the move two trading days ahead. So the
+# moves on the two trading days after a member's last day are labels of its member days.
+LABEL_HORIZON = 2
 
 
 def member_moves(
     provider: Path, code: str, spans: list[tuple[str, str]], calendar: list[str]
 ) -> list[tuple[str, float]]:
-    """Each member day's move against the previous valid close, as (day, move), in calendar order."""
+    """The moves a member's returns and labels are made of, as (day, move), in calendar order.
+
+    Each is a close against the previous valid close, on a member day or on one of the LABEL_HORIZON
+    trading days after each span.
+    """
     path = provider / "features" / code.lower() / "close.day.bin"
     if not path.exists():
         return []
@@ -1001,16 +1178,20 @@ def member_moves(
     start, closes = int(values[0]) if len(values) else 0, values[1:].astype("float64")
     valid = np.flatnonzero(np.isfinite(closes) & (closes > 0))
     moves = closes[valid[1:]] / closes[valid[:-1]] - 1
+    ranges = [
+        (bisect.bisect_left(calendar, first), bisect.bisect_right(calendar, last) - 1 + LABEL_HORIZON)
+        for first, last in spans
+    ]
     result = []
     for position, move in zip(valid[1:], moves, strict=True):
-        day = calendar[start + int(position)]
-        if any(first <= day <= last for first, last in spans):
-            result.append((day, float(move)))
+        index = start + int(position)
+        if any(low <= index <= high for low, high in ranges):
+            result.append((calendar[index], float(move)))
     return result
 
 
 def impossible_moves(provider: Path, code: str, spans: list[tuple[str, str]], calendar: list[str]) -> list[str]:
-    """Member days whose close rose by 100% or more, or fell by 50% or more; a rise has a leading "+"."""
+    """Moves of ``member_moves`` that rose by 100% or more, or fell by 50% or more; a rise has a leading "+"."""
     return [
         ("+" if move > 0 else "-") + day
         for day, move in member_moves(provider, code, spans, calendar)
@@ -1018,54 +1199,81 @@ def impossible_moves(provider: Path, code: str, spans: list[tuple[str, str]], ca
     ]
 
 
+def unchanged_share(moves: list[tuple[str, float]]) -> float:
+    return sum(move == 0 for _, move in moves) / len(moves) if moves else 0.0
+
+
+def large_moves(moves: list[tuple[str, float]]) -> int:
+    return sum(abs(move) > LARGE_MOVE for _, move in moves)
+
+
 def judge_series(moves: list[tuple[str, float]]) -> dict | None:
     """Why a member's series cannot be trusted, and from which day; None when it can.
 
-    An interleaved or runaway series is sound until its first impossible move: two impossible rises, or
-    three impossible moves, are never real. No stretch of a frozen or quantized series can be trusted.
+    Two impossible rises, or three impossible moves, are never real. An interleaved series (two companies'
+    prices alternating under one code: TIE, HNZ, CBE) is sound until its first one, with no move beyond
+    LARGE_MOVE before it, and is trusted up to then. A runaway adjustment (CHK: 11 such moves from 2006 to
+    2008 on its ex-dividend days), a quantized series (EP, GR) or a sparse foreign one (MEE in 2008) has
+    some, and they are not trusted on any day ("from" is None). Nor is a frozen series, or a sparse
+    foreign one without impossible rises (AYE), whose moves are often large.
     """
     impossible = [(day, move) for day, move in moves if not IMPOSSIBLE_FALL < move < IMPOSSIBLE_RISE]
     if sum(move > 0 for _, move in impossible) >= 2 or len(impossible) >= 3:  # noqa: PLR2004 - see above
-        return {"impossible_moves": len(impossible), "from": impossible[0][0]}
-    unchanged = sum(move == 0 for _, move in moves) / len(moves) if moves else 0.0
-    large = sum(abs(move) > LARGE_MOVE for _, move in moves)
+        breaks = impossible[0][0]
+        before = [(day, move) for day, move in moves if day < breaks]
+        large = large_moves(before)
+        return {
+            "impossible_moves": len(impossible),
+            "large_moves_before": large,
+            "unchanged_days_before": round(unchanged_share(before), 3),
+            "from": None if large else breaks,
+        }
+    unchanged, large = unchanged_share(moves), large_moves(moves)
     if unchanged >= FROZEN_SHARE and large:
         return {"unchanged_days": round(unchanged, 3), "large_moves": large, "from": None}
+    if large >= SPARSE_LARGE_MOVES and large > SPARSE_LARGE_SHARE * len(moves):
+        return {"large_moves": large, "moves": len(moves), "from": None}
     return None
 
 
-def untrusted_members(provider: Path, spans: list[Span]) -> dict[str, dict]:
-    """The members whose series is broken while they are in the index, with ``judge_series``'s verdict."""
+def untrusted_members(provider: Path, spans: list[Span]) -> dict[str, list[dict]]:
+    """The member spans whose series is broken, by code, each with its days and ``judge_series``'s verdict.
+
+    Each span is judged on its own: one code can hold two companies years apart. CEG's series until 2012
+    is frozen, while the Constellation Energy that joined in 2022 is sound.
+    """
     calendar = (provider / "calendars" / "day.txt").read_text().split()
-    by_code: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    for code, start, end in spans:
-        by_code[code].append((start, end))
-    untrusted = {}
-    for code, member_spans in by_code.items():
-        verdict = judge_series(member_moves(provider, code, member_spans, calendar))
+    untrusted: dict[str, list[dict]] = defaultdict(list)
+    for code, start, end in sorted(spans):
+        verdict = judge_series(member_moves(provider, code, [(start, end)], calendar))
         if verdict is not None:
-            untrusted[code] = verdict
-    return untrusted
+            untrusted[code].append({"start": start, "end": end, **verdict})
+    return dict(untrusted)
 
 
-def trim_untrusted(spans: list[Span], untrusted: dict[str, dict], calendar: list[str]) -> list[Span]:
-    """End each untrusted member's spans on the day before its series breaks; drop a frozen one."""
+def trim_untrusted(spans: list[Span], untrusted: dict[str, list[dict]], calendar: list[str]) -> list[Span]:
+    """End each untrusted span before its series breaks; drop the spans trusted on no day.
+
+    A span keeps its days up to LABEL_HORIZON + 1 trading days before the break, so no kept day's label
+    reads a broken close.
+    """
+    verdicts = {(code, item["start"], item["end"]): item for code, items in untrusted.items() for item in items}
     result = []
     for code, start, end in spans:
-        verdict = untrusted.get(code)
+        verdict = verdicts.get((code, start, end))
         if verdict is None:
             result.append((code, start, end))
             continue
         breaks = verdict["from"]
         if breaks is None:
             continue
-        before = calendar[bisect.bisect_left(calendar, breaks) - 1]
-        if start <= before:
-            result.append((code, start, min(end, before)))
+        last = bisect.bisect_left(calendar, breaks) - 1 - LABEL_HORIZON
+        if last >= 0 and start <= calendar[last]:
+            result.append((code, start, min(end, calendar[last])))
     return sorted(result)
 
 
-def drop_untrusted_members(provider: Path, universe: str) -> dict[str, dict]:
+def drop_untrusted_members(provider: Path, universe: str) -> dict[str, list[dict]]:
     """Cut members with a broken price series out of the universe file and record them for the audit.
 
     Their returns are impossible (+189,000% in a day for TIE), and one such label wipes out a day's
@@ -1099,6 +1307,12 @@ def audit(provider: Path) -> dict:
 
     report["fields"] = sorted({path.name for path in (provider / "features").glob("*/*.day.bin")})
     report["misaligned"] = misaligned_instruments(provider)
+    # Closes left between the days of FOREIGN_BARS; each should be 0.
+    report["foreign_closes_left"] = {
+        code: int(D.features([code], ["$close"], start_time=first or None, end_time=last)["$close"].notna().sum())
+        for code, (first, last) in FOREIGN_BARS.items()
+        if (provider / "features" / code.lower()).is_dir()
+    }
 
     checks = [d for d in ("2010-01-04", "2015-01-02", "2020-01-02", "2022-01-03", "2024-01-02") if d <= calendar[-1]]
     checks.append(calendar[-1])
@@ -1199,7 +1413,11 @@ def main(argv: list[str] | None = None) -> int:
     build_cmd = commands.add_parser("build", help="copy the provider, extend prices and rebuild membership")
     build_cmd.add_argument("--source", type=Path, required=True)
     build_cmd.add_argument("--target", type=Path, required=True)
-    build_cmd.add_argument("--end", default=date.today().isoformat(), help="last day to download (default: today)")
+    build_cmd.add_argument(
+        "--end",
+        default=last_business_day((date.today() - pd.Timedelta(days=1)).isoformat()),
+        help="last day to download (default: the last trading day before today)",
+    )
     build_cmd.add_argument("--delay", type=float, default=1.0, help="seconds between Yahoo requests")
     build_cmd.add_argument("--reuse-raw", type=Path, help="folder of Yahoo CSVs from an earlier build to reuse")
     audit_cmd = commands.add_parser("audit", help="check coverage, the seam and splits of a provider")

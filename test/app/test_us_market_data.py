@@ -1,6 +1,7 @@
 import json
 import math
 import types
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -14,11 +15,12 @@ from rdagent.app.us_market_data import (
     PLACEHOLDER_START,
     UNREFRESHED,
     Bar,
+    blank_foreign_bars,
+    build,
     check_refresh,
     clip_to_data,
     coalesce_spans,
     copy_reused_raw,
-    current_members,
     download_list,
     drop_untrusted_members,
     finalize_frame,
@@ -27,6 +29,7 @@ from rdagent.app.us_market_data import (
     instruments_text,
     judge_series,
     keep_index_bars,
+    last_business_day,
     last_member_days,
     merge_spans,
     misaligned_instruments,
@@ -38,6 +41,7 @@ from rdagent.app.us_market_data import (
     plan_extension,
     raw_last_days,
     read_instruments,
+    refresh_raw_files,
     replace_placeholder_spans,
     restore_unrefreshed,
     resume_cutover,
@@ -46,6 +50,7 @@ from rdagent.app.us_market_data import (
     sp500_spans,
     spans_from_daily_members,
     stale_raw_files,
+    symbols_needing_data,
     symbols_to_download,
     symbols_to_retry,
     trim_untrusted,
@@ -270,14 +275,17 @@ def test_the_normalizer_calendar_needs_no_download(tmp_path):
     pd.DataFrame(
         {
             "symbol": "^GSPC",
-            "date": ["2020-11-09", "2020-11-10", "2020-11-11", "2020-11-12"],
-            "close": [3550.5, 3545.5, 3572.7, np.nan],  # a row without a close is not a trading day
+            "date": ["2020-11-09", "2020-11-10", "2020-11-11", "2020-11-12", "2020-11-13"],
+            "open": [3583.0, 3543.3, 3563.2, 3562.7, np.nan],
+            # A row with prices but no close is a trading day; a row without any price, as Yahoo writes for
+            # a corporate action, is not.
+            "close": [3550.5, 3545.5, 3572.7, np.nan, np.nan],
         }
     ).to_csv(raw / "^GSPC.csv", index=False)
 
     calendar = normalization_calendar(tmp_path, raw)
 
-    assert calendar == [pd.Timestamp(day) for day in ("2020-11-09", "2020-11-10", "2020-11-11")]
+    assert calendar == [pd.Timestamp(day) for day in ("2020-11-09", "2020-11-10", "2020-11-11", "2020-11-12")]
 
 
 def test_gapped_codes_are_normalized_on_their_own(tmp_path):
@@ -362,7 +370,7 @@ def test_a_placeholder_span_follows_the_company_through_its_tickers():
         ("DD", PLACEHOLDER_START, OPEN_END),
         ("FISV", PLACEHOLDER_START, OPEN_END),
         ("IR", "2010-11-17", OPEN_END),
-        ("PCS", PLACEHOLDER_START, "2013-04-29"),
+        ("PCS", PLACEHOLDER_START, "2013-04-29"),  # MetroPCS
         ("TT", PLACEHOLDER_START, OPEN_END),
     ]
     source = [
@@ -383,21 +391,31 @@ def test_a_placeholder_span_follows_the_company_through_its_tickers():
         ("DD", PLACEHOLDER_START, OPEN_END),
         ("FISV", "2001-04-02", OPEN_END),
         ("IR", "2020-03-03", OPEN_END),
-        ("PCS", PLACEHOLDER_START, "2004-04-22"),
-        ("PCS", "2009-06-30", "2013-04-29"),
+        ("PCS", "2009-06-30", "2013-04-29"),  # without the Sprint PCS years
         ("TT", PLACEHOLDER_START, "2009-06-30"),
         ("TT", "2010-11-17", OPEN_END),
-        ("UA", "2016-04-08", OPEN_END),  # the class C shares; class A, under UAA, was UA until then
+        ("UA", "2016-04-08", OPEN_END),  # the class C shares' first day; the class A shares are under UAA
     ]
 
 
 def test_old_file_tickers_move_to_the_code_that_holds_their_prices():
-    spans = [("DPS", "2008-05-07", "2018-06-29"), ("LDOS", "2019-08-09", OPEN_END), ("SAI", "2009-12-21", "2013-09-19")]
+    spans = [
+        ("DPS", "2008-05-07", "2018-06-29"),
+        ("GOOG", "2006-04-03", OPEN_END),  # the class A shares until 2014-04-02
+        ("GOOGL", "2014-04-03", OPEN_END),
+        ("LDOS", "2019-08-09", OPEN_END),
+        ("SAI", "2009-12-21", "2013-09-19"),
+    ]
 
     assert move_to_data_codes(spans, LONG_CALENDAR) == [
+        ("GOOG", "2014-04-03", OPEN_END),
+        ("GOOGL", "2006-04-03", OPEN_END),
         ("KDP", "2008-05-07", "2018-06-29"),
         ("LDOS", "2009-12-21", "2013-09-19"),
         ("LDOS", "2019-08-09", OPEN_END),
+    ]
+    assert move_to_data_codes([("GOOG", "2010-01-04", "2012-12-31")], LONG_CALENDAR) == [
+        ("GOOGL", "2010-01-04", "2012-12-31")
     ]
 
 
@@ -428,6 +446,23 @@ def test_membership_keeps_the_source_members_for_the_audit(tmp_path):
     ]
 
 
+def test_the_nasdaq_100_file_also_names_members_by_the_code_that_holds_their_prices(tmp_path):
+    (tmp_path / "instruments").mkdir()
+    (tmp_path / "_sources").mkdir()
+    old = [("GOOG", "2005-12-19", OPEN_END), ("GOOGL", "2014-04-03", OPEN_END), ("JDSU", "2000-01-03", "2008-12-19")]
+    (tmp_path / "instruments" / "nasdaq100.txt").write_text(instruments_text(old))
+    source = [("GOOG", "2020-11-11", OPEN_END), ("GOOGL", "2020-11-11", OPEN_END)]
+    last_data = {"GOOG": LONG_CALENDAR[-1], "GOOGL": LONG_CALENDAR[-1]}
+
+    write_membership(tmp_path, "nasdaq100", source, {}, last_data, LONG_CALENDAR, CUTOVER, "2020-11-11")
+
+    assert read_instruments(tmp_path / "instruments" / "nasdaq100.txt") == [
+        ("GOOG", "2014-04-03", OPEN_END),
+        ("GOOGL", "2005-12-19", OPEN_END),  # the class A shares were named GOOG until 2014-04-02
+        ("VIAV", "2000-01-03", "2008-12-19"),  # JDS Uniphase's prices are under VIAV
+    ]
+
+
 def test_an_interrupted_build_resumes_but_an_extended_target_is_refused(tmp_path):
     (tmp_path / "calendars").mkdir()
     (tmp_path / "_sources").mkdir()
@@ -443,7 +478,7 @@ def test_an_interrupted_build_resumes_but_an_extended_target_is_refused(tmp_path
 
 
 def write_raw(folder, symbol, days):
-    folder.mkdir(exist_ok=True)
+    folder.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({"symbol": symbol, "date": days, "close": 1.0}).to_csv(folder / f"{symbol}.csv", index=False)
 
 
@@ -456,6 +491,22 @@ def test_raw_files_that_stop_where_an_earlier_build_ended_are_stale(tmp_path):
     assert stale_raw_files(tmp_path, end="2026-11-23") == ["SNDK"]
     assert stale_raw_files(tmp_path, end="2026-11-22") == ["SNDK"]  # a Sunday: Friday is the last business day
     assert stale_raw_files(tmp_path, end="2026-12-31") == ["AAPL", "MSFT", "SNDK", "^GSPC"]
+
+
+def test_an_end_on_a_market_holiday_asks_for_the_trading_day_before_it(tmp_path):
+    assert last_business_day("2026-11-26") == "2026-11-25"  # Thanksgiving
+    assert last_business_day("2026-04-03") == "2026-04-02"  # Good Friday
+    assert last_business_day("2026-11-22") == "2026-11-20"  # a Sunday
+    for symbol in ("AAPL", "^GSPC"):
+        write_raw(tmp_path, symbol, ["2026-11-24", "2026-11-25"])
+
+    assert stale_raw_files(tmp_path, end="2026-11-26") == []  # nothing to download again on every run
+
+
+def test_a_build_refuses_an_end_yahoo_cannot_serve(tmp_path):
+    with pytest.raises(SystemExit, match="must be before today"):
+        build(tmp_path / "source", tmp_path / "target", date.today().isoformat(), delay=0.5)
+    assert not (tmp_path / "target").exists()
 
 
 def test_stale_symbols_are_downloaded_again_even_with_the_same_end(tmp_path):
@@ -481,12 +532,12 @@ def test_a_reused_file_never_replaces_one_this_target_already_has(tmp_path):
 
 def test_a_stale_file_is_kept_until_the_download_replaces_it(tmp_path):
     raw, aside = tmp_path / "raw", tmp_path / "aside"
-    write_raw(raw, "AAPL", ["2026-11-23"])
-    write_raw(raw, "MSFT", ["2026-11-23"])
+    write_raw(raw, "AAPL", ["2020-11-03", "2026-11-23"])
+    write_raw(raw, "MSFT", ["2020-11-03", "2026-11-23"])
 
     set_aside(raw, ["AAPL", "MSFT"], aside)
     assert raw_last_days(raw) == {}
-    write_raw(raw, "AAPL", ["2026-12-31"])  # Yahoo answered for AAPL only
+    write_raw(raw, "AAPL", ["2020-11-03", "2026-12-31"])  # Yahoo answered for AAPL only, from the same start
 
     assert restore_unrefreshed(raw, aside) == ["MSFT"]
     assert raw_last_days(raw) == {"AAPL": "2026-12-31", "MSFT": "2026-11-23"}
@@ -494,22 +545,170 @@ def test_a_stale_file_is_kept_until_the_download_replaces_it(tmp_path):
     assert restore_unrefreshed(raw, aside) == []
 
 
-def test_a_refresh_stops_for_a_lagging_benchmark_or_current_members_without_new_data(tmp_path):
-    stale = [f"S{number:02d}" for number in range(40)] + ["^GSPC", "^NDX", "^DJI"]
-    for symbol in stale:
+def test_a_download_that_starts_after_the_old_file_ends_does_not_replace_it(tmp_path):
+    raw, aside = tmp_path / "raw", tmp_path / "aside"
+    write_raw(raw, "AAPL", ["2020-11-03", "2026-11-23"])
+    write_raw(raw, "ANSS", ["2020-11-03", "2025-07-16"])
+    set_aside(raw, ["AAPL", "ANSS"], aside)
+    write_raw(raw, "AAPL", ["2020-11-03", "2026-12-31"])
+    write_raw(raw, "ANSS", ["2026-12-31"])  # a stub row under a delisted company's ticker
+
+    assert restore_unrefreshed(raw, aside) == ["ANSS"]
+    assert raw_last_days(raw) == {"AAPL": "2026-12-31", "ANSS": "2025-07-16"}
+
+
+def test_the_symbols_that_need_new_data():
+    last = {"AAPL": "2026-11-23", "GONE": "2024-03-01", "LATE": "2026-11-23", "OUT": "2026-11-20"}
+    spans = [
+        ("AAPL", "1999-01-01", OPEN_END),
+        ("ATVI", "2010-01-04", "2023-10-18"),  # without a file and not current: Yahoo had nothing for it
+        ("GONE", "2010-01-04", "2024-03-04"),  # removed right after its last bar: it left the market
+        ("KVUE", "2023-08-25", OPEN_END),  # current, without a file
+        ("LATE", "2010-01-04", "2026-12-15"),  # removed three weeks after its file ends: Yahoo missed days
+        ("OUT", "2010-01-04", "2026-11-23"),
+    ]
+
+    assert symbols_needing_data(spans, last) == {"AAPL", "KVUE", "LATE", *BENCHMARKS}
+
+
+END = "2026-12-31"
+
+
+def test_a_refresh_stops_for_a_lagging_benchmark_or_many_members_without_new_data(tmp_path):
+    for symbol in [*(f"S{number:03d}" for number in range(10)), *BENCHMARKS]:
         write_raw(tmp_path, symbol, ["2026-12-31"])
-    current = {f"S{number:02d}" for number in range(30)} | {"^GSPC", "^NDX", "^DJI"}
+    needed = {f"S{number:03d}" for number in range(500)} | set(BENCHMARKS)  # a limit of 5
+    five = [f"S{number:03d}" for number in range(5)]
 
-    # Ten symbols that left the index: they may have left the market too.
-    check_refresh(tmp_path, stale, unrefreshed=[f"S{number:02d}" for number in range(30, 40)], current=current)
-    check_refresh(tmp_path, stale, unrefreshed=["S00", "S01"], current=current)  # Yahoo misses one now and then
-    check_refresh(tmp_path, [], unrefreshed=[], current=current)
+    check_refresh(tmp_path, ["L1", "L2", "L3"], needed, END)  # not needed: they may have left the market
+    check_refresh(tmp_path, five, needed, END)  # Yahoo misses a few now and then
+    write_raw(tmp_path, "ODD", ["2027-01-04"])  # a bar after the end is not a day the benchmarks must have
+    check_refresh(tmp_path, [], needed, END)
 
-    with pytest.raises(SystemExit, match="current members without new data: S00, S01, S02"):
-        check_refresh(tmp_path, stale, unrefreshed=["S00", "S01", "S02"], current=current)
+    with pytest.raises(SystemExit, match="6 members without new data: S000, S001, S002, S003, S004, S005"):
+        check_refresh(tmp_path, [*five, "S005"], needed, END)
     write_raw(tmp_path, "^GSPC", ["2026-11-23"])
-    with pytest.raises(SystemExit, match="left the benchmarks .'\\^GSPC'. behind"):
-        check_refresh(tmp_path, stale, unrefreshed=["^GSPC"], current=current)
+    with pytest.raises(SystemExit, match=r"The benchmarks \['\^GSPC'\] are missing or end before 2026-12-31"):
+        check_refresh(tmp_path, [], needed, END)
+    (tmp_path / "^GSPC.csv").unlink()
+    with pytest.raises(SystemExit, match=r"The benchmarks \['\^GSPC'\] are missing"):
+        check_refresh(tmp_path, ["^GSPC"], needed, END)
+
+
+FULL = ["2020-11-03", "2026-12-31"]
+
+
+def fake_yahoo(sources, answers, asked):
+    """A stand-in for the Yahoo download: it writes the files of the symbols it has data for."""
+
+    def download(symbols):
+        asked.append(sorted(symbols))
+        for symbol in symbols:
+            if symbol in answers:
+                write_raw(sources / "yahoo_raw", symbol, answers[symbol])
+
+    return download
+
+
+def test_a_rerun_after_a_lagging_benchmark_stopped_the_build_asks_for_it_again(tmp_path):
+    sources = tmp_path / "_sources"
+    symbols = ["AAPL", "MSFT", *BENCHMARKS]
+    for symbol in symbols:
+        write_raw(sources / "yahoo_raw", symbol, ["2020-11-03", "2026-11-23"])
+    spans = [("AAPL", "1999-01-01", OPEN_END), ("MSFT", "1999-01-01", OPEN_END)]
+    everything = {symbol: FULL for symbol in symbols}
+    asked = []
+
+    with pytest.raises(SystemExit, match=r"The benchmarks \['\^GSPC'\] are missing or end before 2026-12-31"):
+        without_gspc = {symbol: days for symbol, days in everything.items() if symbol != "^GSPC"}
+        refresh_raw_files(sources, None, symbols, spans, "2026-12-31", fake_yahoo(sources, without_gspc, asked))
+    assert (sources / UNREFRESHED).read_text() == "^GSPC\n"
+
+    refresh_raw_files(sources, None, symbols, spans, "2026-12-31", fake_yahoo(sources, everything, asked))
+
+    assert asked[-1] == ["^GSPC"]  # the other files already reach the end
+    assert raw_last_days(sources / "yahoo_raw")["^GSPC"] == "2026-12-31"
+
+
+def test_an_interrupted_refresh_resumes_as_a_refresh_but_an_interrupted_same_end_run_does_not(tmp_path):
+    earlier = tmp_path / "earlier" / "_sources"
+    for symbol in ["AAPL", "MSFT", *BENCHMARKS]:
+        write_raw(earlier / "yahoo_raw", symbol, ["2020-11-03", "2026-11-23"])
+    write_raw(earlier / "yahoo_raw", "SNDK", ["2020-11-03", "2026-11-19"])  # Yahoo missed its last days
+    (earlier / "symbols.txt").write_text("AAPL\nMSFT\nSNDK\nZZZ\n^DJI\n^GSPC\n^NDX\n")  # nothing for ZZZ
+    spans = [(symbol, "1999-01-01", OPEN_END) for symbol in ("AAPL", "MSFT", "SNDK")]
+    spans.append(("ZZZ", "1999-01-01", "2024-01-02"))
+    symbols = ["AAPL", "MSFT", "SNDK", "ZZZ", *BENCHMARKS]
+    everything = {symbol: FULL for symbol in symbols if symbol != "ZZZ"}
+
+    def stopped_after_three_files(sources, days):
+        def download(symbols):
+            for symbol in symbols[:3]:
+                write_raw(sources / "yahoo_raw", symbol, days)
+            raise KeyboardInterrupt
+
+        return download
+
+    refresh = tmp_path / "refresh" / "_sources"
+    with pytest.raises(KeyboardInterrupt):
+        refresh_raw_files(
+            refresh, earlier / "yahoo_raw", symbols, spans, "2026-12-31", stopped_after_three_files(refresh, FULL)
+        )
+    asked = []
+    refresh_raw_files(
+        refresh, earlier / "yahoo_raw", symbols, spans, "2026-12-31", fake_yahoo(refresh, everything, asked)
+    )
+    # Most files reach the new end, but the resumed run is still a refresh, so ZZZ is asked for again.
+    assert asked == [["ZZZ", "^DJI", "^GSPC", "^NDX"]]
+
+    # Stopped again, right after it put the old files back: the next run still knows them and the refresh.
+    twice = tmp_path / "twice" / "_sources"
+    with pytest.raises(KeyboardInterrupt):
+        refresh_raw_files(
+            twice, earlier / "yahoo_raw", symbols, spans, "2026-12-31", stopped_after_three_files(twice, FULL)
+        )
+    assert restore_unrefreshed(twice / "yahoo_raw", twice / "yahoo_raw_stale", keep=True) == ["^DJI", "^GSPC", "^NDX"]
+    asked = []
+    refresh_raw_files(twice, earlier / "yahoo_raw", symbols, spans, "2026-12-31", fake_yahoo(twice, everything, asked))
+    assert asked == [["ZZZ", "^DJI", "^GSPC", "^NDX"]]
+    assert not (twice / "yahoo_raw_stale").exists()
+
+    same_end = tmp_path / "same_end" / "_sources"
+    with pytest.raises(KeyboardInterrupt):
+        refresh_raw_files(
+            same_end,
+            earlier / "yahoo_raw",
+            symbols,
+            spans,
+            "2026-11-23",
+            stopped_after_three_files(same_end, ["2020-11-03", "2026-11-23"]),
+        )
+    asked = []
+    refresh_raw_files(
+        same_end, earlier / "yahoo_raw", symbols, spans, "2026-11-23", fake_yahoo(same_end, everything, asked)
+    )
+    assert asked == []  # SNDK's new file was saved before the stop; ZZZ is not asked again
+
+
+def test_needed_members_left_behind_are_retried_and_a_few_are_accepted(tmp_path, capsys):
+    sources = tmp_path / "_sources"
+    members = ["AAPL", "MSFT", "NVDA", "WMT"]
+    for symbol in [*members, "OUT", *BENCHMARKS]:
+        write_raw(sources / "yahoo_raw", symbol, ["2020-11-03", "2026-11-23"])
+    spans = [(symbol, "1999-01-01", OPEN_END) for symbol in [*members, "KVUE"]]
+    spans.append(("OUT", "1999-01-01", "2026-12-15"))  # removed three weeks after its file ends
+    symbols = sorted([*members, "KVUE", "OUT", *BENCHMARKS])
+    answers = {symbol: FULL for symbol in symbols if symbol not in ("KVUE", "OUT")}  # Yahoo misses two
+    asked = []
+
+    refresh_raw_files(sources, None, symbols, spans, "2026-12-31", fake_yahoo(sources, answers, asked))
+    assert "Warning: members without new data, retried by the next build: KVUE, OUT" in capsys.readouterr().out
+    assert (sources / UNREFRESHED).read_text() == "KVUE\nOUT\n"
+
+    # A later run with the same end asks for both again, although KVUE has never had a file.
+    refresh_raw_files(sources, None, symbols, spans, "2026-12-31", fake_yahoo(sources, answers, asked))
+    assert asked[-1] == ["KVUE", "OUT"]
+    assert "Warning: members without new data" in capsys.readouterr().out
 
 
 def test_symbols_a_refresh_left_behind_are_retried_by_later_runs(tmp_path):
@@ -521,7 +720,6 @@ def test_symbols_a_refresh_left_behind_are_retried_by_later_runs(tmp_path):
 
     assert symbols_to_retry(sources, reused / "yahoo_raw") == {"AAPL", "MSFT", "GONE"}
     assert symbols_to_retry(sources, None) == {"AAPL"}
-    assert current_members([("AAPL", "1999-01-01", OPEN_END), ("GONE", "1999-01-01", "2026-12-01")]) == {"AAPL"}
 
 
 def test_bars_outside_their_range_are_counted_per_code():
@@ -570,29 +768,67 @@ def test_misaligned_bins_are_detected(tmp_path):
     assert misaligned_instruments(tmp_path) == ["BAD"]
 
 
-def test_members_with_a_broken_price_series_are_cut_from_the_day_it_breaks(tmp_path):
+def test_members_with_a_broken_price_series_are_cut_before_their_labels_read_it(tmp_path):
     days = [f"2010-02-{day:02d}" for day in range(1, 13)]
     (tmp_path / "calendars").mkdir()
     (tmp_path / "calendars" / "day.txt").write_text("\n".join(days) + "\n")
     (tmp_path / "instruments").mkdir()
     (tmp_path / "_sources").mkdir()
-    spans = [("AIG", days[0], days[-1]), ("LATE", days[8], days[-1]), ("TIE", days[0], days[-1])]
+    spans = [
+        ("AIG", days[0], days[-1]),
+        ("CEG", days[0], days[4]),
+        ("CEG", days[7], days[-1]),
+        ("CHK", days[0], days[-1]),
+        ("LATE", days[8], days[-1]),
+        ("TIE", days[0], days[-1]),
+    ]
     (tmp_path / "instruments" / "sp500.txt").write_text(instruments_text(spans))
-    # Sound for three days, then two series interleaved under one code, as the old provider has for TIE.
-    write_bin(tmp_path / "features" / "tie" / "close.day.bin", 0, [14, 14.2, 14.1, 20000, 14, 20000] + [14] * 6)
+    # Sound for six days, then two series interleaved under one code, as the old provider has for TIE.
+    tie = [14, 14.2, 14.1, 14.3, 14.2, 14.4, 20000, 14, 20000, 14, 14, 14]
+    write_bin(tmp_path / "features" / "tie" / "close.day.bin", 0, tie)
+    # A runaway adjustment: fake large moves first, as CHK has on its ex-dividend days, then impossible ones.
+    chk = [10, 14, 14.1, 20, 20.1, 28, 28.2, 60, 125, 260, 261, 262]
+    write_bin(tmp_path / "features" / "chk" / "close.day.bin", 0, chk)
+    # One code, two companies: a frozen series, then years later a sound one, as CEG has.
+    ceg = [5, 5, 5, 8, 8, np.nan, np.nan, 8.1, 8.2, 8.15, 8.3, 8.25]
+    write_bin(tmp_path / "features" / "ceg" / "close.day.bin", 0, ceg)
     # One real crash (AIG fell 61% on 2008-09-15) does not make a series broken.
     write_bin(tmp_path / "features" / "aig" / "close.day.bin", 0, [100, 39, 40, 41, 40, 41, 42, 41, 40, 41, 42, 43])
     # Broken only before it joined the index.
     write_bin(tmp_path / "features" / "late" / "close.day.bin", 0, [1, 5, 1, 5, 1, 5, 1, 5, 5.1, 5.2, 5.3, 5.4])
-    verdict = {"TIE": {"impossible_moves": 4, "from": days[3]}}
+    verdict = {
+        "CEG": [{"start": days[0], "end": days[4], "unchanged_days": 0.75, "large_moves": 1, "from": None}],
+        "CHK": [
+            {
+                "start": days[0],
+                "end": days[-1],
+                "impossible_moves": 3,
+                "large_moves_before": 3,
+                "unchanged_days_before": 0.0,
+                "from": None,
+            }
+        ],
+        "TIE": [
+            {
+                "start": days[0],
+                "end": days[-1],
+                "impossible_moves": 4,
+                "large_moves_before": 0,
+                "unchanged_days_before": 0.0,
+                "from": days[6],
+            }
+        ],
+    }
 
     assert untrusted_members(tmp_path, spans) == verdict
     assert drop_untrusted_members(tmp_path, "sp500") == verdict
 
     assert read_instruments(tmp_path / "instruments" / "sp500.txt") == [
         ("AIG", days[0], days[-1]),
+        ("CEG", days[7], days[-1]),  # the sound company keeps its membership
         ("LATE", days[8], days[-1]),
-        ("TIE", days[0], days[2]),  # the sound days before the break are kept
+        # The sound days are kept, up to the last one whose label, the move two days ahead, is sound.
+        ("TIE", days[0], days[3]),
     ]
     assert json.loads((tmp_path / "_sources" / "sp500_untrusted.json").read_text()) == verdict
 
@@ -602,6 +838,8 @@ def test_a_frozen_or_quantized_series_is_untrusted_but_a_merely_stale_one_is_not
     # BMC in the old provider: three price levels, so a fall of 80% and a rise of 360% among flat days.
     quantized = [1.0] * 30 + [0.2] * 30 + [0.92] * 30
     stale = [10 + (number % 5) * 0.1 if number % 4 else 10 for number in range(90)]  # often unchanged, no jump
+    # EP in the old provider: a few ticks apart, with impossible doublings among them.
+    ticks = [1, 1, 1.4, 1.4, 1.4, 1.2, 1.2, 1.2, 1, 1, 2, 2, 4, 4, 4.1, 4.2]
 
     def moves(closes):
         return [(days[i], closes[i] / closes[i - 1] - 1) for i in range(1, len(closes))]
@@ -611,19 +849,90 @@ def test_a_frozen_or_quantized_series_is_untrusted_but_a_merely_stale_one_is_not
     assert judge_series(moves([10.0, 20.0] + [20.0 + n * 0.1 for n in range(30)])) is None  # one doubling
     assert judge_series(moves([10.0, 20.0, 40.0] + [40.0 + n * 0.1 for n in range(30)])) == {
         "impossible_moves": 2,
+        "large_moves_before": 0,
+        "unchanged_days_before": 0.0,
         "from": days[1],
+    }
+    assert judge_series(moves(ticks)) == {
+        "impossible_moves": 2,
+        "large_moves_before": 1,
+        "unchanged_days_before": 0.667,
+        "from": None,  # quantized before it breaks: trusted on no day
+    }
+    # AYE: a sparse foreign series without an impossible rise, but with many large moves among few.
+    few = [10, 10.1, 10.2, 13.5, 13.6, 13.7, 9.0, 9.1, 9.2, 12.5] + [12.6 + n * 0.1 for n in range(11)]
+    assert judge_series(moves(few)) == {"large_moves": 3, "moves": 20, "from": None}
+    # MEE in 2008: a sparse foreign series, with large moves among its few bars before it breaks.
+    sparse = [100, 100.5, 140, 139, 100, 2, 98, 2, 99]
+    assert judge_series(moves(sparse)) == {
+        "impossible_moves": 4,
+        "large_moves_before": 1,
+        "unchanged_days_before": 0.0,
+        "from": None,
     }
 
 
-def test_frozen_members_are_dropped_and_broken_ones_are_cut():
-    calendar = ["2012-01-03", "2012-01-04", "2012-01-05", "2012-01-06"]
-    spans = [("BMC", "2012-01-03", OPEN_END), ("HNZ", "2012-01-03", OPEN_END), ("HNZ", "2011-01-03", "2011-06-30")]
-    untrusted = {"BMC": {"from": None}, "HNZ": {"from": "2012-01-05"}}
+def test_untrusted_spans_are_cut_before_the_break_or_dropped():
+    calendar = [day.date().isoformat() for day in pd.bdate_range("2012-01-03", periods=10)]
+    spans = [
+        ("BMC", "2012-01-03", OPEN_END),
+        ("HNZ", "2011-01-03", "2011-06-30"),
+        ("HNZ", "2012-01-03", OPEN_END),
+        ("TIE", "2012-01-04", OPEN_END),
+    ]
+    untrusted = {
+        "BMC": [{"start": "2012-01-03", "end": OPEN_END, "from": None}],
+        "HNZ": [{"start": "2012-01-03", "end": OPEN_END, "from": "2012-01-10"}],
+        "TIE": [{"start": "2012-01-04", "end": OPEN_END, "from": "2012-01-05"}],  # breaks on its second day
+    }
 
     assert trim_untrusted(spans, untrusted, calendar) == [
-        ("HNZ", "2011-01-03", "2011-06-30"),
-        ("HNZ", "2012-01-03", "2012-01-04"),
+        ("HNZ", "2011-01-03", "2011-06-30"),  # a span without a verdict is kept
+        ("HNZ", "2012-01-03", "2012-01-05"),  # three trading days before the break
     ]
+
+
+def test_the_two_days_after_a_span_are_judged_with_it(tmp_path):
+    days = [f"2010-02-{day:02d}" for day in range(1, 8)]
+    write_bin(tmp_path / "features" / "end" / "close.day.bin", 0, [10, 10.1, 10.2, 10.3, 30, 10, 30])
+
+    # The moves on the two days after the last member day are the labels of its last two member days.
+    assert impossible_moves(tmp_path, "END", [(days[0], days[3])], days) == ["+2010-02-05", "-2010-02-06"]
+
+
+def test_bars_of_another_security_are_blanked_before_the_member_s_own_begin(tmp_path):
+    days = ["2016-04-05", "2016-04-06", "2016-04-07", "2016-04-08", "2016-04-11"]
+    (tmp_path / "calendars").mkdir()
+    (tmp_path / "calendars" / "day.txt").write_text("\n".join(days) + "\n")
+    ua = tmp_path / "features" / "ua"
+    # Class A until 2016-04-06, a when-issued class C print on 2016-04-07, then the class C shares.
+    write_bin(ua / "close.day.bin", 1, [84.0, 41.0, 41.5, 42.0])
+    write_bin(ua / "change.day.bin", 1, [np.nan, -0.51, 0.012, 0.012])
+
+    assert blank_foreign_bars(tmp_path) == ["UA"]  # FOREIGN_BARS: UA's bars until 2016-04-07
+
+    close, change = (np.fromfile(ua / name, dtype="<f4") for name in ("close.day.bin", "change.day.bin"))
+    np.testing.assert_array_equal(close, np.array([1, np.nan, np.nan, 41.5, 42.0], dtype="<f4"))
+    # The first own bar's change is a move against the other security's close.
+    np.testing.assert_array_equal(change, np.array([1, np.nan, np.nan, np.nan, 0.012], dtype="<f4"))
+    assert blank_foreign_bars(tmp_path) == []
+
+
+def test_when_issued_bars_between_two_histories_are_blanked(tmp_path):
+    days = ["2014-03-26", "2014-03-27", "2014-03-28", "2014-04-02", "2014-04-03", "2014-04-04"]
+    (tmp_path / "calendars").mkdir()
+    (tmp_path / "calendars" / "day.txt").write_text("\n".join(days) + "\n")
+    goog = tmp_path / "features" / "goog"
+    # The class A history, when-issued class C prints from 2014-03-27 to 2014-04-02, then the class C shares.
+    write_bin(goog / "volume.day.bin", 0, [2.6e8, 6.5e5, 2.1e6, 7.4e6, 2.5e8, 2.4e8])
+    write_bin(goog / "change.day.bin", 0, [0.01, -0.012, 0.002, 0.001, 0.003, -0.02])
+
+    assert blank_foreign_bars(tmp_path) == ["GOOG"]
+
+    volume, change = (np.fromfile(goog / name, dtype="<f4") for name in ("volume.day.bin", "change.day.bin"))
+    nan = np.nan
+    np.testing.assert_array_equal(volume, np.array([0, 2.6e8, nan, nan, nan, 2.5e8, 2.4e8], dtype="<f4"))
+    np.testing.assert_array_equal(change, np.array([0, 0.01, nan, nan, nan, nan, -0.02], dtype="<f4"))
 
 
 def test_impossible_moves_compare_with_the_previous_valid_close(tmp_path):

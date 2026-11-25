@@ -234,3 +234,14 @@ def test_market_runs_use_the_pruning_factor_runner_unless_the_caller_chose_one()
     assert kept["QLIB_QUANT_FACTOR_RUNNER"] == "upstream.Runner"
     assert kept["QLIB_FACTOR_RUNNER"] == PRUNING_FACTOR_RUNNER
     assert env["QLIB_QUANT_FACTOR_SUMMARIZER"] == env["QLIB_FACTOR_SUMMARIZER"] == GUARDED_FACTOR_SUMMARIZER
+
+
+def test_each_market_keeps_its_own_coder_knowledge_whatever_the_parent_sets():
+    parent = {"CoSTEER_KNOWLEDGE_BASE_PATH": "/shared/knowledge.pkl"}
+
+    env = MarketProcessConfig(context=make_context()).build_env(parent)
+
+    factor_file = "/memory/us-sp500/factor_coder_knowledge.pkl"
+    model_file = "/memory/us-sp500/model_coder_knowledge.pkl"
+    assert env["FACTOR_CoSTEER_KNOWLEDGE_BASE_PATH"] == env["FACTOR_CoSTEER_NEW_KNOWLEDGE_BASE_PATH"] == factor_file
+    assert env["CoSTEER_KNOWLEDGE_BASE_PATH"] == env["CoSTEER_NEW_KNOWLEDGE_BASE_PATH"] == model_file

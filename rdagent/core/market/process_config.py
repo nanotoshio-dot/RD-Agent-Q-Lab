@@ -9,6 +9,10 @@ from rdagent.core.market.trading_rules import TRADING_RULE_ENV_KEYS
 
 # Written by rdagent.app.us_market_data at the end of each build, relative to the provider.
 PROVIDER_BUILD_ID = Path("_sources") / "build_id.txt"
+# Files in a market's memory folder. The factor coder reads the FACTOR_CoSTEER_ settings, the model coder
+# the plain CoSTEER_ ones.
+FACTOR_CODER_KNOWLEDGE = "factor_coder_knowledge.pkl"
+MODEL_CODER_KNOWLEDGE = "model_coder_knowledge.pkl"
 # The factor runner of market runs: it prunes weak or redundant factors before the backtest.
 PRUNING_FACTOR_RUNNER = "rdagent.scenarios.qlib.developer.factor_pruning.PruningFactorRunner"
 # The factor feedback of market runs: a "replace the best result" needs a better annualized return.
@@ -108,6 +112,12 @@ class MarketProcessConfig:
                 "RD_MARKET_CALENDAR": str(ctx.calendar),
                 "RD_MARKET_MEMORY_PATH": str(ctx.memory_path),
                 "RD_MARKET_CACHE_PATH": str(ctx.cache_path),
+                # What the coders learn stays with the market, and is there for its next run: without a
+                # path they keep it in memory only. A path from the parent would be shared by all markets.
+                "FACTOR_CoSTEER_KNOWLEDGE_BASE_PATH": str(ctx.memory_path / FACTOR_CODER_KNOWLEDGE),
+                "FACTOR_CoSTEER_NEW_KNOWLEDGE_BASE_PATH": str(ctx.memory_path / FACTOR_CODER_KNOWLEDGE),
+                "CoSTEER_KNOWLEDGE_BASE_PATH": str(ctx.memory_path / MODEL_CODER_KNOWLEDGE),
+                "CoSTEER_NEW_KNOWLEDGE_BASE_PATH": str(ctx.memory_path / MODEL_CODER_KNOWLEDGE),
             },
         )
         if ctx.trading_rules is not None:

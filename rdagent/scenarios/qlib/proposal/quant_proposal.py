@@ -102,9 +102,17 @@ class QlibQuantHypothesisGen(FactorAndModelHypothesisGen):
             resp = APIBackend().build_messages_and_create_chat_completion(user_prompt, system_prompt, json_mode=True)
 
             action = json.loads(resp).get("action", "factor")
+            if action not in ("factor", "model"):  # anything else would start neither kind of loop
+                action = "factor"
         # ========= random ==========
         elif QUANT_PROP_SETTING.action_selection == "random":
             action = random.choice(["factor", "model"])
+        # ========= fixed ==========
+        elif QUANT_PROP_SETTING.action_selection in ("factor", "model"):
+            # Every loop takes this action: a run of factor loops only, or a test of the model path alone.
+            action = QUANT_PROP_SETTING.action_selection
+        else:
+            raise ValueError(f"Unknown action_selection: {QUANT_PROP_SETTING.action_selection!r}")
         self.targets = action
 
         qaunt_rag = None
@@ -194,6 +202,8 @@ class QlibQuantHypothesisGen(FactorAndModelHypothesisGen):
             concise_observation=response_dict.get("concise_observation"),
             concise_justification=response_dict.get("concise_justification"),
             concise_knowledge=response_dict.get("concise_knowledge"),
-            action=response_dict.get("action"),
+            # The action was decided before the LLM was asked, and the prompt was built for it. The LLM only
+            # echoes it, and a small model may echo the other one.
+            action=self.targets if self.targets in ("factor", "model") else response_dict.get("action"),
         )
         return hypothesis

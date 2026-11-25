@@ -149,7 +149,7 @@ class QuantBasePropSetting(BasePropSetting):
     """Number of evolutions"""
 
     action_selection: str = "bandit"
-    """Action selection strategy: 'bandit' for bandit-based selection, 'llm' for LLM-based selection, 'random' for random selection"""
+    """Action selection strategy: 'bandit' for bandit-based selection, 'llm' for LLM-based selection, 'random' for random selection, 'factor' or 'model' to take that action in every loop"""
 
     train_start: str = "2008-01-01"
     """Start date of the training segment"""

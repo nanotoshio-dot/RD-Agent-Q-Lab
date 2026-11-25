@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from rdagent.core.market import MarketContext, MarketProcessConfig, TradingRules
-from rdagent.core.market.process_config import PROVIDER_BUILD_ID, provider_cutovers
+from rdagent.core.market.process_config import (
+    GUARDED_FACTOR_SUMMARIZER,
+    PROVIDER_BUILD_ID,
+    PRUNING_FACTOR_RUNNER,
+    provider_cutovers,
+)
 from rdagent.core.market.trading_rules import TRADING_RULE_ENV_KEYS
 
 pytestmark = pytest.mark.offline
@@ -217,3 +222,15 @@ def test_provider_cutovers_lists_every_extension_day_oldest_first(tmp_path):
     (tmp_path / "_sources" / "earlier_cutovers.txt").write_text("2020-11-10\n2023-06-30\n")
 
     assert provider_cutovers(tmp_path) == ["2020-11-10", "2023-06-30", "2026-11-23"]
+
+
+def test_market_runs_use_the_pruning_factor_runner_unless_the_caller_chose_one():
+    config = MarketProcessConfig(context=make_context())
+
+    env = config.build_env({})
+    kept = config.build_env({"QLIB_QUANT_FACTOR_RUNNER": "upstream.Runner"})
+
+    assert env["QLIB_QUANT_FACTOR_RUNNER"] == env["QLIB_FACTOR_RUNNER"] == PRUNING_FACTOR_RUNNER
+    assert kept["QLIB_QUANT_FACTOR_RUNNER"] == "upstream.Runner"
+    assert kept["QLIB_FACTOR_RUNNER"] == PRUNING_FACTOR_RUNNER
+    assert env["QLIB_QUANT_FACTOR_SUMMARIZER"] == env["QLIB_FACTOR_SUMMARIZER"] == GUARDED_FACTOR_SUMMARIZER

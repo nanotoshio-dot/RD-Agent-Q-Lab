@@ -330,9 +330,35 @@ def test_a_provider_extended_twice_still_warns_about_the_first_extension_day(tmp
     assert "crosses 2020-11-10" in extension_warning(crossing)
 
 
+def test_a_provider_extended_twice_still_warns_about_the_first_extension_day(tmp_path):
+    from rdagent.app.market_launcher import extension_warning
+
+    crossing = extended_context(tmp_path, date(2019, 1, 2), date(2026, 11, 20))
+    sources = crossing.provider_uri / "_sources"
+    (sources / "cutover.txt").write_text("2026-11-23\n")
+    (sources / "earlier_cutovers.txt").write_text("2020-11-10\n")
+
+    assert "crosses 2020-11-10" in extension_warning(crossing)
+
+
 def test_a_test_period_after_the_extension_day_needs_no_warning(tmp_path):
     from rdagent.app.market_launcher import extension_warning
 
     after = extended_context(tmp_path, date(2021, 1, 4), date(2026, 11, 20))
 
     assert extension_warning(after) is None
+
+
+def test_a_provider_without_the_market_members_is_refused_before_the_run_starts(tmp_path, monkeypatch):
+    def unexpected_run(*args, **kwargs):
+        pytest.fail("The research loop must not start without the market's member file")
+
+    monkeypatch.setattr("rdagent.app.market_launcher.subprocess.run", unexpected_run)
+    provider = tmp_path / "cn_data"
+    (provider / "calendars").mkdir(parents=True)
+    (provider / "calendars" / "day.txt").write_text("2010-01-04\n2024-12-31\n2025-01-02\n")
+    arguments = "--market china --train-start 2010-01-04 --train-end 2017-12-31 --valid-start 2018-01-01"
+    arguments += " --valid-end 2019-12-31 --test-start 2020-01-01 --test-end 2024-12-30 --execute"
+
+    with pytest.raises(SystemExit, match="member file does not exist"):
+        main([*arguments.split(), "--provider-uri", str(provider), "--root", str(tmp_path / "markets")])

@@ -260,6 +260,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"Provider directory does not exist: {context.provider_uri}")
     if not context.calendar.is_file():
         raise SystemExit(f"Qlib calendar does not exist: {context.calendar}")
+    # The backtest and the factor pruning both need it; without this the run fails after its first coding step.
+    members = context.provider_uri / "instruments" / f"{context.qlib_market}.txt"
+    if not members.is_file():
+        raise SystemExit(f"The market's member file does not exist: {members}")
 
     for directory in (
         context.workspace_path,

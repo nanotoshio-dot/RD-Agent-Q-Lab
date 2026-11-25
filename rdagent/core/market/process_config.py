@@ -9,6 +9,10 @@ from rdagent.core.market.trading_rules import TRADING_RULE_ENV_KEYS
 
 # Written by rdagent.app.us_market_data at the end of each build, relative to the provider.
 PROVIDER_BUILD_ID = Path("_sources") / "build_id.txt"
+# The factor runner of market runs: it prunes weak or redundant factors before the backtest.
+PRUNING_FACTOR_RUNNER = "rdagent.scenarios.qlib.developer.factor_pruning.PruningFactorRunner"
+# The factor feedback of market runs: a "replace the best result" needs a better annualized return.
+GUARDED_FACTOR_SUMMARIZER = "rdagent.scenarios.qlib.developer.feedback_guard.ReturnGuardedFactorFeedback"
 # The last day of the data a build extended, and the same days of the builds its source went through.
 PROVIDER_CUTOVER = Path("_sources") / "cutover.txt"
 PROVIDER_EARLIER_CUTOVERS = Path("_sources") / "earlier_cutovers.txt"
@@ -108,6 +112,11 @@ class MarketProcessConfig:
         )
         if ctx.trading_rules is not None:
             env.update(ctx.trading_rules.to_env())
+        # A caller that sets another class keeps it, for example the upstream one to compare with.
+        for key in ("QLIB_QUANT_FACTOR_RUNNER", "QLIB_FACTOR_RUNNER"):
+            env.setdefault(key, PRUNING_FACTOR_RUNNER)
+        for key in ("QLIB_QUANT_FACTOR_SUMMARIZER", "QLIB_FACTOR_SUMMARIZER"):
+            env.setdefault(key, GUARDED_FACTOR_SUMMARIZER)
         return env
 
 

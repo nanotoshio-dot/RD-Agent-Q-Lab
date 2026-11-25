@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import rdagent.scenarios.qlib.experiment.utils as data_utils
@@ -116,6 +117,59 @@ def test_conda_path_is_read_again_after_prepare_creates_the_env(folders, monkeyp
 def clear_market_env(monkeypatch) -> None:
     for name in [key for key in os.environ if key.startswith("RD_MARKET_")]:
         monkeypatch.delenv(name)
+
+
+def test_refresh_readme_replaces_a_stale_copy(tmp_path):
+    (tmp_path / "README.md").write_text("$factor: factor value of the stock on that day.")
+
+    data_utils.refresh_readme(tmp_path)
+
+    assert (tmp_path / "README.md").read_bytes() == (TEMPLATE_DIR / "README.md").read_bytes()
+
+
+@pytest.mark.parametrize(("market_id", "refreshed"), [("china", True), (None, False)])
+def test_only_market_runs_refresh_the_published_readme(folders, monkeypatch, market_id, refreshed):
+    clear_market_env(monkeypatch)
+    if market_id:
+        monkeypatch.setenv("RD_MARKET_ID", market_id)
+    for folder in folders:
+        folder.mkdir(parents=True)
+        (folder / "README.md").write_text("hand-made description")
+    monkeypatch.setattr(data_utils, "get_file_desc", lambda p, variable_list=[]: p.name)
+
+    assert data_utils.get_data_folder_intro() == "README.md"
+
+    template = (TEMPLATE_DIR / "README.md").read_text()
+    for folder in folders:
+        assert ((folder / "README.md").read_text() == template) is refreshed
+
+
+def test_template_readme_names_the_columns_and_the_adjustment_factor():
+    readme = (TEMPLATE_DIR / "README.md").read_text()
+
+    assert 'df["$close"], never df["close"]' in readme
+    assert 'groupby(level="instrument")' in readme
+    assert "$factor: price adjustment factor" in readme
+
+
+def test_the_readme_example_writes_a_result_in_the_expected_format(tmp_path, monkeypatch):
+    # The README is part of the coder's prompt, so its example must run and compute per instrument.
+    readme = (TEMPLATE_DIR / "README.md").read_text()
+    example = readme.split("## A complete factor.py\n```Python\n", 1)[1].split("```", 1)[0]
+    days = pd.date_range("2020-01-01", periods=6, name="datetime")
+    index = pd.MultiIndex.from_product([days, ["A", "B"]], names=["datetime", "instrument"])
+    volume = [1.0, 100.0] * 6
+    data = pd.DataFrame({name: 1.0 for name in ("$open", "$close", "$high", "$low", "$factor")}, index=index)
+    data["$volume"] = volume
+    data.to_hdf(tmp_path / "daily_pv.h5", key="data")
+    monkeypatch.chdir(tmp_path)
+
+    exec(example, {})  # noqa: S102 - the README's own example
+
+    result = pd.read_hdf(tmp_path / "result.h5", key="data")
+    assert list(result.index.names) == ["datetime", "instrument"]
+    assert list(result.columns) == ["Volume_MA5"]
+    assert result.xs("B", level="instrument")["Volume_MA5"].dropna().tolist() == [100.0, 100.0]
 
 
 def test_plain_runs_keep_the_upstream_docker_generation(monkeypatch):

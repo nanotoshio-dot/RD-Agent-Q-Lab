@@ -87,6 +87,14 @@ def generate_data_folder_from_qlib():
             shutil.move(staged, target)
 
 
+def refresh_readme(folder: Path) -> None:
+    """Copy the template README into a published data folder when the two differ."""
+    template = FACTOR_DATA_TEMPLATE / "README.md"
+    target = folder / "README.md"
+    if not target.is_file() or target.read_bytes() != template.read_bytes():
+        shutil.copy(template, target)
+
+
 def get_market_prompt_note(env: Mapping[str, str] | None = None) -> str | None:
     """One line telling the LLM which market it researches, or None where the prompts already fit.
 
@@ -222,6 +230,11 @@ def get_data_folder_intro(fname_reg: str = ".*", flags=0, variable_mapping=None)
         # FIXME: (xiao) I think this is writing in a hard-coded way.
         # get data folder intro does not imply that we are generating the data folder.
         generate_data_folder_from_qlib()
+    if current_market_id() is not None:
+        # Market data folders are built once, so a fixed README would otherwise never reach the prompts.
+        # Plain runs may point data_folder at hand-made data with its own README, so they keep theirs.
+        for folder in (FACTOR_COSTEER_SETTINGS.data_folder, FACTOR_COSTEER_SETTINGS.data_folder_debug):
+            refresh_readme(Path(folder))
     content_l = []
     for p in Path(FACTOR_COSTEER_SETTINGS.data_folder_debug).iterdir():
         if re.match(fname_reg, p.name, flags) is not None:

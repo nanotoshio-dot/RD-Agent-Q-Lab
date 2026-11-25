@@ -292,3 +292,36 @@ def test_dotenv_values_are_overridden_by_the_process_environment(tmp_path, monke
     assert env["EMBEDDING_MODEL"] == "from-file"
     assert "EMPTY_VALUE" not in env
     assert "EMBEDDING_MODEL" not in os.environ
+
+
+def extended_context(tmp_path, test_start, test_end):
+    provider = tmp_path / "us_data_2026"
+    (provider / "_sources").mkdir(parents=True)
+    (provider / "_sources" / "cutover.txt").write_text("2020-11-10\n")
+    return build_market_context(
+        market_id="us-sp500",
+        provider_uri=provider,
+        train_start=date(2010, 1, 1),
+        train_end=date(2014, 12, 31),
+        valid_start=date(2015, 1, 1),
+        valid_end=date(2016, 12, 31),
+        test_start=test_start,
+        test_end=test_end,
+        root=tmp_path / "markets",
+    )
+
+
+def test_a_test_period_crossing_the_extension_day_is_warned_about(tmp_path):
+    from rdagent.app.market_launcher import extension_warning
+
+    crossing = extended_context(tmp_path, date(2020, 1, 1), date(2026, 11, 20))
+
+    assert "crosses 2020-11-10" in extension_warning(crossing)
+
+
+def test_a_test_period_after_the_extension_day_needs_no_warning(tmp_path):
+    from rdagent.app.market_launcher import extension_warning
+
+    after = extended_context(tmp_path, date(2021, 1, 4), date(2026, 11, 20))
+
+    assert extension_warning(after) is None

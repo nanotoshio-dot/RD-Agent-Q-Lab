@@ -140,6 +140,23 @@ def validate_research_dates(context: MarketContext) -> None:
         raise ValueError(message)
 
 
+def extension_warning(context: MarketContext) -> str | None:
+    """Warn when the test period crosses the day a provider was extended (see rdagent.app.us_market_data).
+
+    Members delisted after that day have no later prices, so positions held in them then cannot be sold.
+    """
+    cutover_file = context.provider_uri / "_sources" / "cutover.txt"
+    if not cutover_file.is_file():
+        return None
+    cutover = date.fromisoformat(cutover_file.read_text().strip())
+    if context.test_start <= cutover < context.test_end:
+        return (
+            f"Warning: the test period crosses {cutover}, where this provider was extended. Members delisted "
+            f"after it have no later prices; start the test after {cutover} to avoid frozen positions."
+        )
+    return None
+
+
 def build_child_environment(
     context: MarketContext,
     base_env: dict[str, str] | None = None,
@@ -212,6 +229,9 @@ def main(argv: list[str] | None = None) -> int:
             ensure_docker_supports_market(context.market_id, str(context.provider_uri))
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    warning = extension_warning(context)
+    if warning:
+        print(warning)
     child_env = build_child_environment(context, base_env=load_base_environment(), model_env_type=args.model_env)
     command = [
         sys.executable,

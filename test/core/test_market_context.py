@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from rdagent.core.market import MarketContext, MarketProcessConfig, TradingRules
+from rdagent.core.market.process_config import PROVIDER_BUILD_ID
 from rdagent.core.market.trading_rules import TRADING_RULE_ENV_KEYS
 
 pytestmark = pytest.mark.offline
@@ -170,3 +171,39 @@ def test_factor_data_folder_follows_the_provider_but_not_the_dates():
     assert data_folders(make_context(test_end=date(2022, 6, 30), trading_rules=US_RULES)) == base
     assert data_folders(make_context(provider_uri=Path("/data/us-2026"))) != base
     assert base[0] != base[1]
+
+
+def test_us_markets_on_one_provider_get_their_own_factor_data():
+    def data_folder(**overrides):
+        return MarketProcessConfig(context=make_context(**overrides)).build_env({})["FACTOR_CoSTEER_DATA_FOLDER"]
+
+    assert data_folder(qlib_market="sp500") != data_folder(qlib_market="nasdaq100")
+
+
+def test_factor_data_folder_changes_when_the_provider_is_rebuilt_to_the_same_day(tmp_path):
+    provider = tmp_path / "us"
+    calendar = provider / "calendars" / "day.txt"
+    calendar.parent.mkdir(parents=True)
+    calendar.write_text("2026-11-20\n2026-11-23\n")
+
+    def data_folder():
+        context = make_context(provider_uri=provider, calendar=calendar)
+        return MarketProcessConfig(context=context).build_env({})["FACTOR_CoSTEER_DATA_FOLDER"]
+
+    unbuilt = data_folder()
+    build_id = provider / PROVIDER_BUILD_ID
+    build_id.parent.mkdir()
+    build_id.write_text("2026-11-24T23:00:00Z\n")
+    first = data_folder()
+    build_id.write_text("2026-11-25T03:00:00Z\n")
+
+    assert len({unbuilt, first, data_folder()}) == 3
+
+
+def test_china_factor_data_does_not_depend_on_the_universe():
+    # generate.py loads the whole market for China, so its existing data folder must keep its key.
+    def data_folder(**overrides):
+        context = make_context(region="cn", benchmark="SH000300", **overrides)
+        return MarketProcessConfig(context=context).build_env({})["FACTOR_CoSTEER_DATA_FOLDER"]
+
+    assert data_folder(qlib_market="csi300") == data_folder(qlib_market="csi500")

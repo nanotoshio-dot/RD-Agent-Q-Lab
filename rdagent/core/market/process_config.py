@@ -7,6 +7,9 @@ from pathlib import Path
 from rdagent.core.market.context import MarketContext
 from rdagent.core.market.trading_rules import TRADING_RULE_ENV_KEYS
 
+# Written by rdagent.app.us_market_data at the end of each build, relative to the provider.
+PROVIDER_BUILD_ID = Path("_sources") / "build_id.txt"
+
 
 @dataclass(frozen=True)
 class MarketProcessConfig:
@@ -29,12 +32,20 @@ class MarketProcessConfig:
 
         # RD-Agent cache keys ignore data, dates and rules, so each configuration gets its own cache
         # folder. Factor data depends on the provider only, so dates and rules can share it.
-        # The calendar's last day changes whenever the provider is updated in place.
-        data_identity = {
+        # The calendar's last day changes when the provider is extended in place, and the build id when
+        # rdagent.app.us_market_data rebuilds it, even to the same last day.
+        data_identity: dict[str, object] = {
             "provider_uri": str(ctx.provider_uri),
             "region": ctx.region,
             "calendar_last_day": _last_line(ctx.calendar),
         }
+        universe = factor_data_universe(ctx.region, ctx.qlib_market)
+        if universe != "all":  # China keeps its existing key
+            # generate.py loads the full history of every member; data built from member days only is stale.
+            data_identity["universe"] = {"market": universe, "rows": "full history of every member"}
+        build_id = _last_line(ctx.provider_uri / PROVIDER_BUILD_ID)
+        if build_id is not None:
+            data_identity["provider_build"] = build_id
         run_identity = {
             **data_identity,
             "qlib_market": ctx.qlib_market,
@@ -95,6 +106,11 @@ class MarketProcessConfig:
         if ctx.trading_rules is not None:
             env.update(ctx.trading_rules.to_env())
         return env
+
+
+def factor_data_universe(region: str, qlib_market: str) -> str:
+    """The instruments generate.py loads; keep in sync with MARKET in factor_data_template/generate.py."""
+    return "all" if region == "cn" else qlib_market
 
 
 def _short_hash(values: Mapping[str, object]) -> str:

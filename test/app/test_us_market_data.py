@@ -12,22 +12,26 @@ from rdagent.app.us_market_data import (
     FIELDS,
     OPEN_END,
     PLACEHOLDER_START,
+    UNREFRESHED,
     Bar,
     check_refresh,
     clip_to_data,
     coalesce_spans,
     copy_reused_raw,
+    current_members,
     download_list,
     drop_untrusted_members,
     finalize_frame,
     has_impossible_prices,
     impossible_moves,
     instruments_text,
+    judge_series,
     keep_index_bars,
     last_member_days,
     merge_spans,
     misaligned_instruments,
     move_to_data_codes,
+    normalization_calendar,
     normalize_extend_in_process,
     normalize_ticker,
     ohlc_violations,
@@ -43,6 +47,8 @@ from rdagent.app.us_market_data import (
     spans_from_daily_members,
     stale_raw_files,
     symbols_to_download,
+    symbols_to_retry,
+    trim_untrusted,
     untrusted_members,
     write_membership,
 )
@@ -256,6 +262,24 @@ def test_change_is_chained_to_the_old_close_across_leading_missing_days():
     assert change[2] == 0.1
 
 
+def test_the_normalizer_calendar_needs_no_download(tmp_path):
+    (tmp_path / "calendars").mkdir()
+    (tmp_path / "calendars" / "day.txt").write_text("2020-11-09\n2020-11-10\n")
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    pd.DataFrame(
+        {
+            "symbol": "^GSPC",
+            "date": ["2020-11-09", "2020-11-10", "2020-11-11", "2020-11-12"],
+            "close": [3550.5, 3545.5, 3572.7, np.nan],  # a row without a close is not a trading day
+        }
+    ).to_csv(raw / "^GSPC.csv", index=False)
+
+    calendar = normalization_calendar(tmp_path, raw)
+
+    assert calendar == [pd.Timestamp(day) for day in ("2020-11-09", "2020-11-10", "2020-11-11")]
+
+
 def test_gapped_codes_are_normalized_on_their_own(tmp_path):
     calls = []
 
@@ -319,7 +343,7 @@ def test_placeholder_spans_get_the_member_days_the_source_knows():
         ("LIN", PLACEHOLDER_START, OPEN_END),
         ("OKE", PLACEHOLDER_START, "2001-08-29"),
         ("OKE", "2010-03-15", OPEN_END),
-        ("UA", "2014-05-01", OPEN_END),
+        ("UA", "2016-04-08", OPEN_END),  # see OLD_SPAN_FIRST_DAYS
         ("XYZ", PLACEHOLDER_START, OPEN_END),
     ]
 
@@ -355,7 +379,7 @@ def test_a_placeholder_span_follows_the_company_through_its_tickers():
         ("TT", "2020-03-03", OPEN_END),
     ]
 
-    assert replace_placeholder_spans(old, source, LONG_CALENDAR, CUTOVER) == [
+    assert replace_placeholder_spans(old + [("UA", "2014-05-01", OPEN_END)], source, LONG_CALENDAR, CUTOVER) == [
         ("DD", PLACEHOLDER_START, OPEN_END),
         ("FISV", "2001-04-02", OPEN_END),
         ("IR", "2020-03-03", OPEN_END),
@@ -363,6 +387,7 @@ def test_a_placeholder_span_follows_the_company_through_its_tickers():
         ("PCS", "2009-06-30", "2013-04-29"),
         ("TT", PLACEHOLDER_START, "2009-06-30"),
         ("TT", "2010-11-17", OPEN_END),
+        ("UA", "2016-04-08", OPEN_END),  # the class C shares; class A, under UAA, was UA until then
     ]
 
 
@@ -469,19 +494,34 @@ def test_a_stale_file_is_kept_until_the_download_replaces_it(tmp_path):
     assert restore_unrefreshed(raw, aside) == []
 
 
-def test_a_refresh_that_leaves_most_files_or_a_benchmark_behind_stops_the_build(tmp_path):
+def test_a_refresh_stops_for_a_lagging_benchmark_or_current_members_without_new_data(tmp_path):
     stale = [f"S{number:02d}" for number in range(40)] + ["^GSPC", "^NDX", "^DJI"]
     for symbol in stale:
         write_raw(tmp_path, symbol, ["2026-12-31"])
+    current = {f"S{number:02d}" for number in range(30)} | {"^GSPC", "^NDX", "^DJI"}
 
-    check_refresh(tmp_path, stale, unrefreshed=["S00", "S01"])  # two delisted since the earlier build: fine
-    check_refresh(tmp_path, [], unrefreshed=[])
+    # Ten symbols that left the index: they may have left the market too.
+    check_refresh(tmp_path, stale, unrefreshed=[f"S{number:02d}" for number in range(30, 40)], current=current)
+    check_refresh(tmp_path, stale, unrefreshed=["S00", "S01"], current=current)  # Yahoo misses one now and then
+    check_refresh(tmp_path, [], unrefreshed=[], current=current)
 
-    with pytest.raises(SystemExit, match="refreshed 33 of 43 stale files"):
-        check_refresh(tmp_path, stale, unrefreshed=stale[:10])
+    with pytest.raises(SystemExit, match="current members without new data: S00, S01, S02"):
+        check_refresh(tmp_path, stale, unrefreshed=["S00", "S01", "S02"], current=current)
     write_raw(tmp_path, "^GSPC", ["2026-11-23"])
     with pytest.raises(SystemExit, match="left the benchmarks .'\\^GSPC'. behind"):
-        check_refresh(tmp_path, stale, unrefreshed=["^GSPC"])
+        check_refresh(tmp_path, stale, unrefreshed=["^GSPC"], current=current)
+
+
+def test_symbols_a_refresh_left_behind_are_retried_by_later_runs(tmp_path):
+    sources, reused = tmp_path / "target" / "_sources", tmp_path / "earlier" / "_sources"
+    for folder in (sources, reused / "yahoo_raw"):
+        folder.mkdir(parents=True)
+    (sources / UNREFRESHED).write_text("AAPL\n")
+    (reused / UNREFRESHED).write_text("MSFT\nGONE\n")
+
+    assert symbols_to_retry(sources, reused / "yahoo_raw") == {"AAPL", "MSFT", "GONE"}
+    assert symbols_to_retry(sources, None) == {"AAPL"}
+    assert current_members([("AAPL", "1999-01-01", OPEN_END), ("GONE", "1999-01-01", "2026-12-01")]) == {"AAPL"}
 
 
 def test_bars_outside_their_range_are_counted_per_code():
@@ -530,7 +570,7 @@ def test_misaligned_bins_are_detected(tmp_path):
     assert misaligned_instruments(tmp_path) == ["BAD"]
 
 
-def test_members_with_a_broken_price_series_are_found_and_removed(tmp_path):
+def test_members_with_a_broken_price_series_are_cut_from_the_day_it_breaks(tmp_path):
     days = [f"2010-02-{day:02d}" for day in range(1, 13)]
     (tmp_path / "calendars").mkdir()
     (tmp_path / "calendars" / "day.txt").write_text("\n".join(days) + "\n")
@@ -538,18 +578,52 @@ def test_members_with_a_broken_price_series_are_found_and_removed(tmp_path):
     (tmp_path / "_sources").mkdir()
     spans = [("AIG", days[0], days[-1]), ("LATE", days[8], days[-1]), ("TIE", days[0], days[-1])]
     (tmp_path / "instruments" / "sp500.txt").write_text(instruments_text(spans))
-    # Two series interleaved under one code, as the old provider has for TIE.
-    write_bin(tmp_path / "features" / "tie" / "close.day.bin", 0, [14, 20000, 14, 20000] + [14] * 8)
+    # Sound for three days, then two series interleaved under one code, as the old provider has for TIE.
+    write_bin(tmp_path / "features" / "tie" / "close.day.bin", 0, [14, 14.2, 14.1, 20000, 14, 20000] + [14] * 6)
     # One real crash (AIG fell 61% on 2008-09-15) does not make a series broken.
     write_bin(tmp_path / "features" / "aig" / "close.day.bin", 0, [100, 39, 40, 41, 40, 41, 42, 41, 40, 41, 42, 43])
     # Broken only before it joined the index.
     write_bin(tmp_path / "features" / "late" / "close.day.bin", 0, [1, 5, 1, 5, 1, 5, 1, 5, 5.1, 5.2, 5.3, 5.4])
+    verdict = {"TIE": {"impossible_moves": 4, "from": days[3]}}
 
-    assert untrusted_members(tmp_path, spans) == {"TIE": 4}
-    assert drop_untrusted_members(tmp_path, "sp500") == {"TIE": 4}
+    assert untrusted_members(tmp_path, spans) == verdict
+    assert drop_untrusted_members(tmp_path, "sp500") == verdict
 
-    assert [code for code, _, _ in read_instruments(tmp_path / "instruments" / "sp500.txt")] == ["AIG", "LATE"]
-    assert json.loads((tmp_path / "_sources" / "sp500_untrusted.json").read_text()) == {"TIE": 4}
+    assert read_instruments(tmp_path / "instruments" / "sp500.txt") == [
+        ("AIG", days[0], days[-1]),
+        ("LATE", days[8], days[-1]),
+        ("TIE", days[0], days[2]),  # the sound days before the break are kept
+    ]
+    assert json.loads((tmp_path / "_sources" / "sp500_untrusted.json").read_text()) == verdict
+
+
+def test_a_frozen_or_quantized_series_is_untrusted_but_a_merely_stale_one_is_not():
+    days = [f"day{number:03d}" for number in range(90)]
+    # BMC in the old provider: three price levels, so a fall of 80% and a rise of 360% among flat days.
+    quantized = [1.0] * 30 + [0.2] * 30 + [0.92] * 30
+    stale = [10 + (number % 5) * 0.1 if number % 4 else 10 for number in range(90)]  # often unchanged, no jump
+
+    def moves(closes):
+        return [(days[i], closes[i] / closes[i - 1] - 1) for i in range(1, len(closes))]
+
+    assert judge_series(moves(quantized)) == {"unchanged_days": 0.978, "large_moves": 2, "from": None}
+    assert judge_series(moves(stale)) is None
+    assert judge_series(moves([10.0, 20.0] + [20.0 + n * 0.1 for n in range(30)])) is None  # one doubling
+    assert judge_series(moves([10.0, 20.0, 40.0] + [40.0 + n * 0.1 for n in range(30)])) == {
+        "impossible_moves": 2,
+        "from": days[1],
+    }
+
+
+def test_frozen_members_are_dropped_and_broken_ones_are_cut():
+    calendar = ["2012-01-03", "2012-01-04", "2012-01-05", "2012-01-06"]
+    spans = [("BMC", "2012-01-03", OPEN_END), ("HNZ", "2012-01-03", OPEN_END), ("HNZ", "2011-01-03", "2011-06-30")]
+    untrusted = {"BMC": {"from": None}, "HNZ": {"from": "2012-01-05"}}
+
+    assert trim_untrusted(spans, untrusted, calendar) == [
+        ("HNZ", "2011-01-03", "2011-06-30"),
+        ("HNZ", "2012-01-03", "2012-01-04"),
+    ]
 
 
 def test_impossible_moves_compare_with_the_previous_valid_close(tmp_path):

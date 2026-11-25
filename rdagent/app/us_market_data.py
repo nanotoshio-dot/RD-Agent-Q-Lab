@@ -93,7 +93,12 @@ OLD_TICKER_DATA_CODE = {
 }
 # The old file's IR span is the old Ingersoll Rand, whose prices are under TT. The code IR holds the
 # company that took the name and joined the index on this day.
-OLD_SPAN_FIRST_DAYS = {"IR": "2020-03-03"}
+OLD_SPAN_FIRST_DAYS = {
+    "IR": "2020-03-03",
+    # Under Armour's class A traded as UA until 2016-04-07 and its history is under UAA; UA has named the
+    # class C shares since 2016-04-08. Earlier, the old file counts the company twice.
+    "UA": "2016-04-08",
+}
 # The fields of the original provider. Yahoo adds adjclose and dividends, which dump_update would write
 # with the wrong start date for existing instruments.
 FIELDS = ("open", "high", "low", "close", "volume", "factor", "change")
@@ -524,6 +529,19 @@ def load_yahoo_collector():  # noqa: ANN201 - module object from a file outside 
     return module
 
 
+def normalization_calendar(provider: Path, raw_dir: Path) -> list[pd.Timestamp]:
+    """The trading days Qlib's normalizer reindexes each series to: the provider's and the benchmark's.
+
+    Qlib downloads the whole ^GSPC history from Yahoo for this, once per normalizer, and a slow link times
+    it out after the hour of work before it. The provider's calendar and the downloaded ^GSPC file hold
+    the same days.
+    """
+    days = set((provider / "calendars" / "day.txt").read_text().split())
+    frame = read_yahoo_csv(raw_dir / f"{BENCHMARKS[0]}.csv")
+    days.update(frame.index[frame["close"].notna()])
+    return [pd.Timestamp(day) for day in sorted(days)]
+
+
 def normalize_extend_in_process(
     collector, runner, old_provider: Path, standalone: set[str]  # noqa: ANN001 - Qlib objects
 ) -> None:
@@ -751,23 +769,47 @@ def restore_unrefreshed(raw_dir: Path, aside: Path) -> list[str]:
     return restored
 
 
-def check_refresh(raw_dir: Path, stale: list[str], unrefreshed: list[str]) -> None:
-    """Stop before the provider is touched when a refresh left too much behind.
+UNREFRESHED = "unrefreshed.txt"  # in _sources: symbols a refresh left behind, retried by later runs
 
-    A few symbols may have left the market since the earlier build. Many, or a benchmark, mean Yahoo did
-    not answer: the calendar would grow while most members and the benchmark end early.
+
+def symbols_to_retry(sources: Path, reuse_raw: Path | None) -> set[str]:
+    """The symbols an earlier run of this target, or the build whose files are reused, left unrefreshed."""
+    folders = [sources] + ([reuse_raw.parent] if reuse_raw is not None else [])
+    found: set[str] = set()
+    for folder in folders:
+        if (folder / UNREFRESHED).is_file():
+            found.update((folder / UNREFRESHED).read_text().split())
+    return found
+
+
+def current_members(*source_spans: list[Span]) -> set[str]:
+    """Symbols that the sources still list as members."""
+    return {symbol for spans in source_spans for symbol, _, end in spans if end == OPEN_END}
+
+
+def check_refresh(raw_dir: Path, stale: list[str], unrefreshed: list[str], current: set[str]) -> None:
+    """Stop before the provider is touched when a refresh left a benchmark or current members behind.
+
+    A symbol that left the index may have left the market too, and Yahoo has nothing more for it. A
+    current member without new data would leave the index early, as would every member if the
+    benchmarks lagged. Unrefreshed symbols are recorded and retried by later runs either way.
     """
     if not stale:
         return
     last = raw_last_days(raw_dir)
     newest = max(last.values())
     late = [symbol for symbol in BENCHMARKS if last.get(symbol, "") < newest]
-    if late or len(unrefreshed) > max(5, len(stale) // 20):  # noqa: PLR2004 - a handful may have delisted
+    members = sorted(set(unrefreshed) & current)
+    if late or len(members) > max(2, len(stale) // 100):  # noqa: PLR2004 - Yahoo misses a symbol now and then
         raise SystemExit(
             f"Yahoo refreshed {len(stale) - len(unrefreshed)} of {len(stale)} stale files"
             + (f" and left the benchmarks {late} behind" if late else "")
-            + "; nothing was changed in the provider. Run the same command again."
+            + (f"; current members without new data: {', '.join(members[:20])}" if members else "")
+            + ". Nothing was changed in the provider. Run the same command again; if the same members"
+            " keep failing, check their tickers."
         )
+    if members:
+        print(f"Warning: current members without new data, retried by the next build: {', '.join(members)}")
 
 
 def build(source: Path, target: Path, end: str, delay: float, reuse_raw: Path | None = None) -> None:
@@ -806,8 +848,9 @@ def build(source: Path, target: Path, end: str, delay: float, reuse_raw: Path | 
     raw_dir = sources / "yahoo_raw"
     raw_dir.mkdir(exist_ok=True)
     aside = sources / "yahoo_raw_stale"
-    # An interrupted refresh left the files it had not replaced yet there; they are still stale.
-    pending = restore_unrefreshed(raw_dir, aside)
+    # An interrupted refresh left the files it had not replaced yet there; they are still stale, and so are
+    # the files earlier runs could not refresh.
+    pending = set(restore_unrefreshed(raw_dir, aside)) | symbols_to_retry(sources, reuse_raw)
     tried: set[str] = set()  # symbols the earlier build already asked Yahoo for, with or without data
     if reuse_raw is not None:
         copy_reused_raw(reuse_raw, raw_dir)
@@ -815,8 +858,8 @@ def build(source: Path, target: Path, end: str, delay: float, reuse_raw: Path | 
             tried = set((reuse_raw.parent / "symbols.txt").read_text().split())
     symbols = symbols_to_download(sp500 + ndx_new, since=cutover)
     # A file nobody asks for any more is left alone.
-    stale = sorted((set(stale_raw_files(raw_dir, end)) | set(pending)) & set(symbols))
-    refreshing = bool(pending) or usual_last_day(raw_last_days(raw_dir)) < last_business_day(end)
+    stale = sorted((set(stale_raw_files(raw_dir, end)) | pending) & set(symbols))
+    refreshing = usual_last_day(raw_last_days(raw_dir)) < last_business_day(end)
     set_aside(raw_dir, stale, aside)
     missing = download_list(symbols, raw_dir, stale, tried, refreshing)
     print(
@@ -834,9 +877,10 @@ def build(source: Path, target: Path, end: str, delay: float, reuse_raw: Path | 
             delay=delay, start=start, end=(pd.Timestamp(end) + pd.Timedelta(days=1)).date().isoformat()
         )
     unrefreshed = restore_unrefreshed(raw_dir, aside)
+    (sources / UNREFRESHED).write_text("".join(f"{symbol}\n" for symbol in unrefreshed))
     if unrefreshed:
         print(f"Yahoo returned nothing for {len(unrefreshed)} stale symbols; their earlier files are kept")
-    check_refresh(raw_dir, stale, unrefreshed)
+    check_refresh(raw_dir, stale, unrefreshed, current_members(sp500, ndx_new))
     absent = [symbol for symbol in BENCHMARKS if not (raw_dir / f"{symbol}.csv").exists()]
     if absent:
         raise SystemExit(f"No Yahoo data for the benchmarks {absent}; run the same command again.")
@@ -853,6 +897,8 @@ def build(source: Path, target: Path, end: str, delay: float, reuse_raw: Path | 
         f"{len(plan.gapped)} after a gap, {len(plan.dropped)} dropped"
     )
     runner.source_dir = sources / "yahoo_planned"
+    calendar = normalization_calendar(target, raw_dir)
+    collector.YahooNormalizeUS._get_calendar_list = lambda self: calendar  # instead of a Yahoo download
     normalize_extend_in_process(collector, runner, target, set(plan.gapped))
     last_bar = finalize_normalized(sources / "yahoo_normalized", sources / "yahoo_final", target, cutover)
     from dump_bin import (  # noqa: PLC0415 - lives in the Qlib scripts folder
@@ -874,7 +920,7 @@ def build(source: Path, target: Path, end: str, delay: float, reuse_raw: Path | 
     for universe in ("sp500", "nasdaq100"):
         untrusted = drop_untrusted_members(target, universe)
         if untrusted:
-            print(f"{universe}: removed {len(untrusted)} members with a broken price series: {sorted(untrusted)}")
+            print(f"{universe}: cut {len(untrusted)} members with a broken price series: {sorted(untrusted)}")
     print("Instruments rebuilt; running the audit")
     report = audit(target)
     (sources / "audit.json").write_text(json.dumps(report, indent=2))
@@ -937,13 +983,17 @@ def misaligned_instruments(provider: Path) -> list[str]:
 # interleaves two series for some codes (TIE, HNZ, CBE) and has runaway adjustments for others (CHK).
 IMPOSSIBLE_RISE = 1.0
 IMPOSSIBLE_FALL = -0.5
+# It also has frozen or quantized series: BMC sits on 3 price levels, EP and GR jump between a few ticks.
+# A member's close is unchanged on about 0.5% of its days; only such series reach this share, and with a
+# move beyond LARGE_MOVE as well they make fake labels. A share alone would also catch merely stale ones.
+FROZEN_SHARE = 0.15
+LARGE_MOVE = 0.3
 
 
-def impossible_moves(provider: Path, code: str, spans: list[tuple[str, str]], calendar: list[str]) -> list[str]:
-    """Days within ``spans`` whose close moved beyond the limits against the previous valid close.
-
-    A rise is listed with a leading "+", so callers can tell the two apart.
-    """
+def member_moves(
+    provider: Path, code: str, spans: list[tuple[str, str]], calendar: list[str]
+) -> list[tuple[str, float]]:
+    """Each member day's move against the previous valid close, as (day, move), in calendar order."""
     path = provider / "features" / code.lower() / "close.day.bin"
     if not path.exists():
         return []
@@ -951,45 +1001,82 @@ def impossible_moves(provider: Path, code: str, spans: list[tuple[str, str]], ca
     start, closes = int(values[0]) if len(values) else 0, values[1:].astype("float64")
     valid = np.flatnonzero(np.isfinite(closes) & (closes > 0))
     moves = closes[valid[1:]] / closes[valid[:-1]] - 1
-    days = []
+    result = []
     for position, move in zip(valid[1:], moves, strict=True):
-        if IMPOSSIBLE_FALL <= move <= IMPOSSIBLE_RISE:
-            continue
         day = calendar[start + int(position)]
         if any(first <= day <= last for first, last in spans):
-            days.append(("+" if move > 0 else "-") + day)
-    return days
+            result.append((day, float(move)))
+    return result
 
 
-def untrusted_members(provider: Path, spans: list[Span]) -> dict[str, int]:
-    """Members whose series is broken while they are in the index, with their count of impossible moves.
+def impossible_moves(provider: Path, code: str, spans: list[tuple[str, str]], calendar: list[str]) -> list[str]:
+    """Member days whose close rose by 100% or more, or fell by 50% or more; a rise has a leading "+"."""
+    return [
+        ("+" if move > 0 else "-") + day
+        for day, move in member_moves(provider, code, spans, calendar)
+        if not IMPOSSIBLE_FALL < move < IMPOSSIBLE_RISE
+    ]
 
-    One or two impossible falls can be real. Two impossible rises, or three impossible moves, are not.
+
+def judge_series(moves: list[tuple[str, float]]) -> dict | None:
+    """Why a member's series cannot be trusted, and from which day; None when it can.
+
+    An interleaved or runaway series is sound until its first impossible move: two impossible rises, or
+    three impossible moves, are never real. No stretch of a frozen or quantized series can be trusted.
     """
+    impossible = [(day, move) for day, move in moves if not IMPOSSIBLE_FALL < move < IMPOSSIBLE_RISE]
+    if sum(move > 0 for _, move in impossible) >= 2 or len(impossible) >= 3:  # noqa: PLR2004 - see above
+        return {"impossible_moves": len(impossible), "from": impossible[0][0]}
+    unchanged = sum(move == 0 for _, move in moves) / len(moves) if moves else 0.0
+    large = sum(abs(move) > LARGE_MOVE for _, move in moves)
+    if unchanged >= FROZEN_SHARE and large:
+        return {"unchanged_days": round(unchanged, 3), "large_moves": large, "from": None}
+    return None
+
+
+def untrusted_members(provider: Path, spans: list[Span]) -> dict[str, dict]:
+    """The members whose series is broken while they are in the index, with ``judge_series``'s verdict."""
     calendar = (provider / "calendars" / "day.txt").read_text().split()
     by_code: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for code, start, end in spans:
         by_code[code].append((start, end))
     untrusted = {}
     for code, member_spans in by_code.items():
-        moves = impossible_moves(provider, code, member_spans, calendar)
-        rises = sum(move.startswith("+") for move in moves)
-        if rises >= 2 or len(moves) >= 3:  # noqa: PLR2004 - explained in the docstring
-            untrusted[code] = len(moves)
+        verdict = judge_series(member_moves(provider, code, member_spans, calendar))
+        if verdict is not None:
+            untrusted[code] = verdict
     return untrusted
 
 
-def drop_untrusted_members(provider: Path, universe: str) -> dict[str, int]:
-    """Remove members with a broken price series from the universe file and record them for the audit.
+def trim_untrusted(spans: list[Span], untrusted: dict[str, dict], calendar: list[str]) -> list[Span]:
+    """End each untrusted member's spans on the day before its series breaks; drop a frozen one."""
+    result = []
+    for code, start, end in spans:
+        verdict = untrusted.get(code)
+        if verdict is None:
+            result.append((code, start, end))
+            continue
+        breaks = verdict["from"]
+        if breaks is None:
+            continue
+        before = calendar[bisect.bisect_left(calendar, breaks) - 1]
+        if start <= before:
+            result.append((code, start, min(end, before)))
+    return sorted(result)
+
+
+def drop_untrusted_members(provider: Path, universe: str) -> dict[str, dict]:
+    """Cut members with a broken price series out of the universe file and record them for the audit.
 
     Their returns are impossible (+189,000% in a day for TIE), and one such label wipes out a day's
-    cross-section when labels are normalized. Without them the universe is slightly smaller.
+    cross-section when labels are normalized.
     """
     path = provider / "instruments" / f"{universe}.txt"
     spans = read_instruments(path)
     untrusted = untrusted_members(provider, spans)
     if untrusted:
-        path.write_text(instruments_text([span for span in spans if span[0] not in untrusted]))
+        calendar = (provider / "calendars" / "day.txt").read_text().split()
+        path.write_text(instruments_text(trim_untrusted(spans, untrusted, calendar)))
     record = provider / "_sources" / f"{universe}_untrusted.json"
     record.write_text(json.dumps(untrusted, indent=2, sort_keys=True))
     return untrusted
@@ -1050,7 +1137,7 @@ def audit(provider: Path) -> dict:
             )
         untrusted_file = provider / "_sources" / f"{universe}_untrusted.json"
         if untrusted_file.is_file():
-            report[f"{universe}_members_removed_for_broken_prices"] = json.loads(untrusted_file.read_text())
+            report[f"{universe}_members_cut_for_broken_prices"] = json.loads(untrusted_file.read_text())
         member_spans: dict[str, list[tuple[str, str]]] = defaultdict(list)
         for code, start, end in spans:
             member_spans[code].append((start, end))

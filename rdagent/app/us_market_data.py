@@ -722,8 +722,24 @@ def resume_cutover(target: Path) -> str:
     return cutover
 
 
+# Days the NYSE closed outside its holiday rules since the old data begins: September 11, the funerals
+# and days of mourning of former presidents, and Hurricane Sandy.
+UNSCHEDULED_CLOSURES = (
+    "2001-09-11",
+    "2001-09-12",
+    "2001-09-13",
+    "2001-09-14",
+    "2004-06-11",
+    "2007-01-02",
+    "2012-10-29",
+    "2012-10-30",
+    "2018-12-05",
+    "2025-01-09",
+)
+
+
 class NYSEHolidays(AbstractHolidayCalendar):
-    """The NYSE's regular holidays. Unscheduled closures (2001-09-11, 2012-10-29, 2025-01-09) are not in it."""
+    """The NYSE's holidays and its unscheduled closures since 2000; a future closure has to be added."""
 
     rules = [  # noqa: RUF012 - pandas reads the class attribute
         Holiday("New Year's Day", month=1, day=1, observance=sunday_to_monday),
@@ -736,6 +752,10 @@ class NYSEHolidays(AbstractHolidayCalendar):
         USLaborDay,
         USThanksgivingDay,
         Holiday("Christmas", month=12, day=25, observance=nearest_workday),
+        *(
+            Holiday(f"Closed {day}", year=int(day[:4]), month=int(day[5:7]), day=int(day[8:]))
+            for day in UNSCHEDULED_CLOSURES
+        ),
     ]
 
 
@@ -836,8 +856,12 @@ def restore_unrefreshed(raw_dir: Path, aside: Path, *, keep: bool = False) -> li
     """
     restored: set[str] = set()
     if aside.is_dir():
-        if keep and (aside / RESTORED).is_file():
-            restored.update((aside / RESTORED).read_text().split())
+        earlier = set((aside / RESTORED).read_text().split()) if (aside / RESTORED).is_file() else set()
+        # Written first: a run stopped inside the loop below still knows every file it may have put back.
+        pending = {normalize_ticker(path.stem) for path in aside.glob("*.csv")}
+        (aside / RESTORED).write_text("".join(f"{symbol}\n" for symbol in sorted(earlier | pending)))
+        if keep:
+            restored = earlier
         for path in sorted(aside.glob("*.csv")):
             new = raw_dir / path.name
             if new.exists():
@@ -846,6 +870,7 @@ def restore_unrefreshed(raw_dir: Path, aside: Path, *, keep: bool = False) -> li
                     new.unlink()
             if new.exists():
                 path.unlink()  # replaced by the download
+                restored.discard(normalize_ticker(path.stem))
             else:
                 path.replace(new)
                 restored.add(normalize_ticker(path.stem))

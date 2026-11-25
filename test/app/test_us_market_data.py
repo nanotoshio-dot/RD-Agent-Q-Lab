@@ -2,6 +2,7 @@ import json
 import math
 import types
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,7 @@ from rdagent.app.us_market_data import (
     FIELDS,
     OPEN_END,
     PLACEHOLDER_START,
+    RESTORED,
     UNREFRESHED,
     Bar,
     blank_foreign_bars,
@@ -497,6 +499,8 @@ def test_an_end_on_a_market_holiday_asks_for_the_trading_day_before_it(tmp_path)
     assert last_business_day("2026-11-26") == "2026-11-25"  # Thanksgiving
     assert last_business_day("2026-04-03") == "2026-04-02"  # Good Friday
     assert last_business_day("2026-11-22") == "2026-11-20"  # a Sunday
+    assert last_business_day("2025-01-09") == "2025-01-08"  # closed for a day of mourning
+    assert last_business_day("2012-10-30") == "2012-10-26"  # closed for Hurricane Sandy
     for symbol in ("AAPL", "^GSPC"):
         write_raw(tmp_path, symbol, ["2026-11-24", "2026-11-25"])
 
@@ -543,6 +547,36 @@ def test_a_stale_file_is_kept_until_the_download_replaces_it(tmp_path):
     assert raw_last_days(raw) == {"AAPL": "2026-12-31", "MSFT": "2026-11-23"}
     assert not aside.exists()
     assert restore_unrefreshed(raw, aside) == []
+
+
+def test_a_run_stopped_while_it_puts_files_back_still_knows_them(tmp_path, monkeypatch):
+    raw, aside = tmp_path / "raw", tmp_path / "aside"
+    for symbol in ("AAPL", "MSFT", "^GSPC"):
+        write_raw(raw, symbol, ["2020-11-03", "2026-11-23"])
+    set_aside(raw, ["AAPL", "MSFT", "^GSPC"], aside)
+    moved = []
+    replace = Path.replace
+
+    def replace_once_then_stop(self, target):
+        if moved:
+            raise KeyboardInterrupt
+        moved.append(self.name)
+        return replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", replace_once_then_stop)
+    with pytest.raises(KeyboardInterrupt):
+        restore_unrefreshed(raw, aside)  # after a download that saved nothing, stopped after one file
+    monkeypatch.undo()
+
+    assert moved == ["AAPL.csv"]
+    assert restore_unrefreshed(raw, aside, keep=True) == ["AAPL", "MSFT", "^GSPC"]  # AAPL is still stale
+
+    # A file a resumed run put back, and then downloaded again before it was stopped, is no longer stale.
+    write_raw(raw, "AAPL", ["2020-11-03", "2026-11-23"])
+    set_aside(raw, ["AAPL"], aside)
+    write_raw(raw, "AAPL", ["2020-11-03", "2026-12-31"])
+    assert restore_unrefreshed(raw, aside, keep=True) == ["MSFT", "^GSPC"]
+    assert (aside / RESTORED).read_text() == "MSFT\n^GSPC\n"
 
 
 def test_a_download_that_starts_after_the_old_file_ends_does_not_replace_it(tmp_path):

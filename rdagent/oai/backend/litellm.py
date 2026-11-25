@@ -1,4 +1,5 @@
 import copyreg
+from collections.abc import Mapping
 from typing import Any, Literal, Optional, Type, TypedDict, Union, cast
 
 import numpy as np
@@ -45,7 +46,7 @@ LITELLM_SETTINGS = LiteLLMSettings()
 ACC_COST = 0.0
 
 
-def input_token_limit(model_info: Optional[dict], fallback: int) -> int:
+def input_token_limit(model_info: Optional[Mapping[str, Any]], fallback: int) -> int:
     """Input room left in the model window after reserving the maximum output.
 
     Some providers (Ollama, for example) report one shared window as both the input and the output limit,
@@ -58,7 +59,7 @@ def input_token_limit(model_info: Optional[dict], fallback: int) -> int:
     max_output = model_info.get("max_output_tokens")
     if max_input is None or max_output is None:
         return fallback
-    room = max_input - max_output
+    room = int(max_input) - int(max_output)
     return room if room > 0 else fallback
 
 

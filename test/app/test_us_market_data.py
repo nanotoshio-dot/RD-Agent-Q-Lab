@@ -17,6 +17,7 @@ from rdagent.app.us_market_data import (
     clip_to_data,
     coalesce_spans,
     copy_reused_raw,
+    download_list,
     drop_untrusted_members,
     finalize_frame,
     has_impossible_prices,
@@ -430,6 +431,16 @@ def test_raw_files_that_stop_where_an_earlier_build_ended_are_stale(tmp_path):
     assert stale_raw_files(tmp_path, end="2026-11-23") == ["SNDK"]
     assert stale_raw_files(tmp_path, end="2026-11-22") == ["SNDK"]  # a Sunday: Friday is the last business day
     assert stale_raw_files(tmp_path, end="2026-12-31") == ["AAPL", "MSFT", "SNDK", "^GSPC"]
+
+
+def test_stale_symbols_are_downloaded_again_even_with_the_same_end(tmp_path):
+    # SNDK's file stopped two days early; it was tried by the earlier build, like every reused symbol.
+    write_raw(tmp_path, "AAPL", ["2026-11-23"])
+    symbols = ["AAPL", "GONE", "NEW", "SNDK"]
+    tried = {"AAPL", "GONE", "SNDK"}  # GONE: Yahoo had nothing for it
+
+    assert download_list(symbols, tmp_path, ["SNDK"], tried, refreshing=False) == ["NEW", "SNDK"]
+    assert download_list(symbols, tmp_path, ["SNDK"], tried, refreshing=True) == ["GONE", "NEW", "SNDK"]
 
 
 def test_a_reused_file_never_replaces_one_this_target_already_has(tmp_path):

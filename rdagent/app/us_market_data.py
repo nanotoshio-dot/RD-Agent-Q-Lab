@@ -702,6 +702,16 @@ def stale_raw_files(raw_dir: Path, end: str) -> list[str]:
     return sorted(symbol for symbol, day in last.items() if floor <= day < wanted)
 
 
+def download_list(symbols: list[str], raw_dir: Path, stale: list[str], tried: set[str], refreshing: bool) -> list[str]:
+    """The symbols to ask Yahoo for: the stale ones, and those without a raw file.
+
+    With the same end as the earlier build, a symbol Yahoo had nothing for is not asked again (each costs
+    several failed attempts). A refresh to a later end asks again: it may be listed now.
+    """
+    skip = set() if refreshing else tried
+    return [s for s in symbols if s in stale or (not (raw_dir / f"{s}.csv").exists() and s not in skip)]
+
+
 def copy_reused_raw(reuse_raw: Path, raw_dir: Path) -> int:
     """Copy an earlier build's raw files this target does not have yet; a file already here is newer."""
     copied = 0
@@ -808,10 +818,7 @@ def build(source: Path, target: Path, end: str, delay: float, reuse_raw: Path | 
     stale = sorted((set(stale_raw_files(raw_dir, end)) | set(pending)) & set(symbols))
     refreshing = bool(pending) or usual_last_day(raw_last_days(raw_dir)) < last_business_day(end)
     set_aside(raw_dir, stale, aside)
-    # With the same end as the earlier build, a symbol Yahoo had nothing for is not asked again (each
-    # costs several failed attempts). A refresh to a later end asks again: it may be listed now.
-    skip = set() if refreshing else tried
-    missing = [s for s in symbols if not (raw_dir / f"{s}.csv").exists() and s not in skip]
+    missing = download_list(symbols, raw_dir, stale, tried, refreshing)
     print(
         f"{len(symbols)} symbols, {len(missing)} to download from Yahoo ({len(stale)} stale, "
         f"{len(tried)} tried by the earlier build)"

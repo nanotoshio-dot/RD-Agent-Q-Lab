@@ -1,3 +1,4 @@
+import json
 import math
 import types
 
@@ -12,27 +13,36 @@ from rdagent.app.us_market_data import (
     OPEN_END,
     PLACEHOLDER_START,
     Bar,
-    clip_placeholder_starts,
+    check_refresh,
     clip_to_data,
     coalesce_spans,
+    copy_reused_raw,
+    drop_untrusted_members,
     finalize_frame,
     has_impossible_prices,
+    impossible_moves,
     instruments_text,
     keep_index_bars,
     last_member_days,
     merge_spans,
     misaligned_instruments,
+    move_to_data_codes,
     normalize_extend_in_process,
     normalize_ticker,
     ohlc_violations,
     plan_extension,
+    raw_last_days,
     read_instruments,
+    replace_placeholder_spans,
+    restore_unrefreshed,
     resume_cutover,
     same_security,
+    set_aside,
     sp500_spans,
     spans_from_daily_members,
     stale_raw_files,
     symbols_to_download,
+    untrusted_members,
     write_membership,
 )
 
@@ -270,7 +280,10 @@ def test_gapped_codes_are_normalized_on_their_own(tmp_path):
     assert calls == [("AAPL", "extend", True), ("ABNB", "extend", True), ("CEG", "plain", False)]
 
 
-def test_placeholder_starts_move_to_the_day_the_source_says_the_company_joined():
+LONG_CALENDAR = [day.date().isoformat() for day in pd.bdate_range("1999-01-01", "2020-12-31")]
+
+
+def test_placeholder_spans_get_the_member_days_the_source_knows():
     old = [
         ("AAPL", PLACEHOLDER_START, OPEN_END),
         ("BRK-B", PLACEHOLDER_START, OPEN_END),
@@ -278,30 +291,87 @@ def test_placeholder_starts_move_to_the_day_the_source_says_the_company_joined()
         ("GOOG", PLACEHOLDER_START, OPEN_END),
         ("LATE", PLACEHOLDER_START, "2005-01-03"),
         ("LIN", PLACEHOLDER_START, OPEN_END),
+        ("OKE", PLACEHOLDER_START, OPEN_END),
         ("UA", "2014-05-01", OPEN_END),
         ("XYZ", PLACEHOLDER_START, OPEN_END),
     ]
     source = [
         ("AAPL", "1996-01-02", OPEN_END),
         ("BRK-B", "2010-02-16", OPEN_END),
-        ("CPRI", "2016-01-04", "2020-05-12"),
-        ("KORS", "2013-11-13", "2018-09-19"),  # Michael Kors, renamed Capri
+        ("CPRI", "2016-01-04", "2020-05-11"),
+        ("KORS", "2013-11-13", "2018-09-18"),  # Michael Kors, renamed Capri
         ("GOOG", "2014-04-03", OPEN_END),
         ("GOOGL", "2006-04-03", OPEN_END),
         ("LATE", "2009-06-01", OPEN_END),
         ("LIN", "2018-11-06", OPEN_END),
-        ("PX", "1996-01-02", "2018-10-31"),  # Praxair, whose history the old provider keeps under LIN
+        ("PX", "1996-01-02", "2018-10-30"),  # Praxair, whose history the old provider keeps under LIN
+        ("OKE", "1996-01-02", "2001-08-29"),  # left the index and came back nine years later
+        ("OKE", "2010-03-15", OPEN_END),
         ("UA", "2016-04-08", OPEN_END),
     ]
 
-    assert clip_placeholder_starts(old, source) == [
+    assert replace_placeholder_spans(old, source, LONG_CALENDAR, CUTOVER) == [
         ("AAPL", PLACEHOLDER_START, OPEN_END),
         ("BRK-B", "2010-02-16", OPEN_END),
         ("CPRI", "2013-11-13", "2020-05-11"),
         ("GOOG", "2006-04-03", OPEN_END),
         ("LIN", PLACEHOLDER_START, OPEN_END),
+        ("OKE", PLACEHOLDER_START, "2001-08-29"),
+        ("OKE", "2010-03-15", OPEN_END),
         ("UA", "2014-05-01", OPEN_END),
         ("XYZ", PLACEHOLDER_START, OPEN_END),
+    ]
+
+
+def test_a_placeholder_span_keeps_its_old_last_day():
+    # The source ends the ticker earlier than the old file; the old parser did read removals.
+    old = [("HNZ", PLACEHOLDER_START, "2013-06-05")]
+    source = [("HNZ", "1996-01-02", "2013-06-03")]
+
+    assert replace_placeholder_spans(old, source, LONG_CALENDAR, CUTOVER) == [("HNZ", PLACEHOLDER_START, "2013-06-05")]
+
+
+def test_a_placeholder_span_follows_the_company_through_its_tickers():
+    old = [
+        ("DD", PLACEHOLDER_START, "2017-08-31"),
+        ("DD", PLACEHOLDER_START, OPEN_END),
+        ("FISV", PLACEHOLDER_START, OPEN_END),
+        ("IR", "2010-11-17", OPEN_END),
+        ("PCS", PLACEHOLDER_START, "2013-04-29"),
+        ("TT", PLACEHOLDER_START, OPEN_END),
+    ]
+    source = [
+        ("DD", "1996-01-02", "2017-08-31"),
+        ("DD", "2019-06-03", OPEN_END),
+        ("DWDP", "2017-09-01", "2019-05-31"),  # DowDuPont, stored under DD
+        ("FISV", "2001-04-02", "2023-06-06"),
+        ("FISV", "2025-11-11", OPEN_END),  # after the cutover: rebuilt separately
+        ("IR", "1996-01-02", "2009-06-30"),  # the old Ingersoll Rand, stored under TT
+        ("IR", "2010-11-17", OPEN_END),
+        ("PCS", "1998-11-24", "2004-04-22"),  # Sprint PCS, another company
+        ("TMUS", "2009-06-30", "2013-04-30"),  # MetroPCS, listed by its later ticker
+        ("TT", "2002-05-13", "2008-06-05"),  # Trane Inc., another company
+        ("TT", "2020-03-03", OPEN_END),
+    ]
+
+    assert replace_placeholder_spans(old, source, LONG_CALENDAR, CUTOVER) == [
+        ("DD", PLACEHOLDER_START, OPEN_END),
+        ("FISV", "2001-04-02", OPEN_END),
+        ("IR", "2020-03-03", OPEN_END),
+        ("PCS", PLACEHOLDER_START, "2004-04-22"),
+        ("PCS", "2009-06-30", "2013-04-29"),
+        ("TT", PLACEHOLDER_START, "2009-06-30"),
+        ("TT", "2010-11-17", OPEN_END),
+    ]
+
+
+def test_old_file_tickers_move_to_the_code_that_holds_their_prices():
+    spans = [("DPS", "2008-05-07", "2018-06-29"), ("LDOS", "2019-08-09", OPEN_END), ("SAI", "2009-12-21", "2013-09-19")]
+
+    assert move_to_data_codes(spans, LONG_CALENDAR) == [
+        ("KDP", "2008-05-07", "2018-06-29"),
+        ("LDOS", "2009-12-21", "2013-09-19"),
+        ("LDOS", "2019-08-09", OPEN_END),
     ]
 
 
@@ -346,17 +416,61 @@ def test_an_interrupted_build_resumes_but_an_extended_target_is_refused(tmp_path
         resume_cutover(tmp_path)
 
 
-def test_raw_files_that_stop_at_an_earlier_build_end_are_stale(tmp_path):
-    def write(symbol, days):
-        pd.DataFrame({"symbol": symbol, "date": days, "close": 1.0}).to_csv(tmp_path / f"{symbol}.csv", index=False)
+def write_raw(folder, symbol, days):
+    folder.mkdir(exist_ok=True)
+    pd.DataFrame({"symbol": symbol, "date": days, "close": 1.0}).to_csv(folder / f"{symbol}.csv", index=False)
 
-    write("AAPL", ["2026-11-20", "2026-11-23"])
-    write("^GSPC", ["2026-11-20", "2026-11-23"])
-    write("GONE", ["2024-03-01"])  # left the market; a new download adds nothing
 
-    assert stale_raw_files(tmp_path, end="2026-11-23") == []
-    assert stale_raw_files(tmp_path, end="2026-11-22") == []  # a Sunday: the last business day is covered
-    assert stale_raw_files(tmp_path, end="2026-11-24") == ["AAPL", "^GSPC"]
+def test_raw_files_that_stop_where_an_earlier_build_ended_are_stale(tmp_path):
+    for symbol in ("AAPL", "MSFT", "^GSPC"):
+        write_raw(tmp_path, symbol, ["2026-11-20", "2026-11-23"])
+    write_raw(tmp_path, "SNDK", ["2026-11-18", "2026-11-19"])  # Yahoo missed its last days
+    write_raw(tmp_path, "GONE", ["2024-03-01"])  # left the market; a new download adds nothing
+
+    assert stale_raw_files(tmp_path, end="2026-11-23") == ["SNDK"]
+    assert stale_raw_files(tmp_path, end="2026-11-22") == ["SNDK"]  # a Sunday: Friday is the last business day
+    assert stale_raw_files(tmp_path, end="2026-12-31") == ["AAPL", "MSFT", "SNDK", "^GSPC"]
+
+
+def test_a_reused_file_never_replaces_one_this_target_already_has(tmp_path):
+    cache, raw = tmp_path / "cache", tmp_path / "raw"
+    write_raw(cache, "AAPL", ["2026-11-23"])
+    write_raw(cache, "MSFT", ["2026-11-23"])
+    write_raw(raw, "AAPL", ["2026-12-31"])  # downloaded by an interrupted run of this build
+
+    assert copy_reused_raw(cache, raw) == 1
+
+    assert raw_last_days(raw) == {"AAPL": "2026-12-31", "MSFT": "2026-11-23"}
+
+
+def test_a_stale_file_is_kept_until_the_download_replaces_it(tmp_path):
+    raw, aside = tmp_path / "raw", tmp_path / "aside"
+    write_raw(raw, "AAPL", ["2026-11-23"])
+    write_raw(raw, "MSFT", ["2026-11-23"])
+
+    set_aside(raw, ["AAPL", "MSFT"], aside)
+    assert raw_last_days(raw) == {}
+    write_raw(raw, "AAPL", ["2026-12-31"])  # Yahoo answered for AAPL only
+
+    assert restore_unrefreshed(raw, aside) == ["MSFT"]
+    assert raw_last_days(raw) == {"AAPL": "2026-12-31", "MSFT": "2026-11-23"}
+    assert not aside.exists()
+    assert restore_unrefreshed(raw, aside) == []
+
+
+def test_a_refresh_that_leaves_most_files_or_a_benchmark_behind_stops_the_build(tmp_path):
+    stale = [f"S{number:02d}" for number in range(40)] + ["^GSPC", "^NDX", "^DJI"]
+    for symbol in stale:
+        write_raw(tmp_path, symbol, ["2026-12-31"])
+
+    check_refresh(tmp_path, stale, unrefreshed=["S00", "S01"])  # two delisted since the earlier build: fine
+    check_refresh(tmp_path, [], unrefreshed=[])
+
+    with pytest.raises(SystemExit, match="refreshed 33 of 43 stale files"):
+        check_refresh(tmp_path, stale, unrefreshed=stale[:10])
+    write_raw(tmp_path, "^GSPC", ["2026-11-23"])
+    with pytest.raises(SystemExit, match="left the benchmarks .'\\^GSPC'. behind"):
+        check_refresh(tmp_path, stale, unrefreshed=["^GSPC"])
 
 
 def test_bars_outside_their_range_are_counted_per_code():
@@ -403,6 +517,38 @@ def test_misaligned_bins_are_detected(tmp_path):
     write_bin(tmp_path / "features" / "bad" / "close.day.bin", 0, range(5))
 
     assert misaligned_instruments(tmp_path) == ["BAD"]
+
+
+def test_members_with_a_broken_price_series_are_found_and_removed(tmp_path):
+    days = [f"2010-02-{day:02d}" for day in range(1, 13)]
+    (tmp_path / "calendars").mkdir()
+    (tmp_path / "calendars" / "day.txt").write_text("\n".join(days) + "\n")
+    (tmp_path / "instruments").mkdir()
+    (tmp_path / "_sources").mkdir()
+    spans = [("AIG", days[0], days[-1]), ("LATE", days[8], days[-1]), ("TIE", days[0], days[-1])]
+    (tmp_path / "instruments" / "sp500.txt").write_text(instruments_text(spans))
+    # Two series interleaved under one code, as the old provider has for TIE.
+    write_bin(tmp_path / "features" / "tie" / "close.day.bin", 0, [14, 20000, 14, 20000] + [14] * 8)
+    # One real crash (AIG fell 61% on 2008-09-15) does not make a series broken.
+    write_bin(tmp_path / "features" / "aig" / "close.day.bin", 0, [100, 39, 40, 41, 40, 41, 42, 41, 40, 41, 42, 43])
+    # Broken only before it joined the index.
+    write_bin(tmp_path / "features" / "late" / "close.day.bin", 0, [1, 5, 1, 5, 1, 5, 1, 5, 5.1, 5.2, 5.3, 5.4])
+
+    assert untrusted_members(tmp_path, spans) == {"TIE": 4}
+    assert drop_untrusted_members(tmp_path, "sp500") == {"TIE": 4}
+
+    assert [code for code, _, _ in read_instruments(tmp_path / "instruments" / "sp500.txt")] == ["AIG", "LATE"]
+    assert json.loads((tmp_path / "_sources" / "sp500_untrusted.json").read_text()) == {"TIE": 4}
+
+
+def test_impossible_moves_compare_with_the_previous_valid_close(tmp_path):
+    days = [f"2010-02-{day:02d}" for day in range(1, 6)]
+    write_bin(tmp_path / "features" / "gap" / "close.day.bin", 1, [10, np.nan, 40, 15])
+
+    moves = impossible_moves(tmp_path, "GAP", [(days[0], days[-1])], days)
+
+    assert moves == ["+2010-02-04", "-2010-02-05"]
+    assert impossible_moves(tmp_path, "NONE", [(days[0], days[-1])], days) == []
 
 
 def test_missing_china_only_module_is_replaced_by_a_loud_stand_in():

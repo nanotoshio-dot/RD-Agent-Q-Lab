@@ -45,10 +45,11 @@ def test_an_empty_result_is_named_with_its_usual_cause():
     assert "to_frame" in feedback
 
 
-def test_a_result_with_only_nan_values_fails():
+def test_a_result_with_only_nan_values_gets_feedback_but_no_verdict():
+    # A correct three-year window has no values on the two-year evaluation sample.
     feedback, passed = check(factor_frame([np.nan, np.nan]))
 
-    assert not passed
+    assert passed is None
     assert "NaN" in feedback
 
 

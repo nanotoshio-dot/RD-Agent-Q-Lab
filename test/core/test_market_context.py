@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from rdagent.core.market import MarketContext, MarketProcessConfig, TradingRules
-from rdagent.core.market.process_config import PROVIDER_BUILD_ID
+from rdagent.core.market.process_config import PROVIDER_BUILD_ID, provider_cutovers
 from rdagent.core.market.trading_rules import TRADING_RULE_ENV_KEYS
 
 pytestmark = pytest.mark.offline
@@ -207,3 +207,13 @@ def test_china_factor_data_does_not_depend_on_the_universe():
         return MarketProcessConfig(context=context).build_env({})["FACTOR_CoSTEER_DATA_FOLDER"]
 
     assert data_folder(qlib_market="csi300") == data_folder(qlib_market="csi500")
+
+
+def test_provider_cutovers_lists_every_extension_day_oldest_first(tmp_path):
+    assert provider_cutovers(tmp_path) == []
+
+    (tmp_path / "_sources").mkdir()
+    (tmp_path / "_sources" / "cutover.txt").write_text("2026-11-23\n")
+    (tmp_path / "_sources" / "earlier_cutovers.txt").write_text("2020-11-10\n2023-06-30\n")
+
+    assert provider_cutovers(tmp_path) == ["2020-11-10", "2023-06-30", "2026-11-23"]

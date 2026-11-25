@@ -319,6 +319,17 @@ def test_a_test_period_crossing_the_extension_day_is_warned_about(tmp_path):
     assert "crosses 2020-11-10" in extension_warning(crossing)
 
 
+def test_a_provider_extended_twice_still_warns_about_the_first_extension_day(tmp_path):
+    from rdagent.app.market_launcher import extension_warning
+
+    crossing = extended_context(tmp_path, date(2019, 1, 2), date(2026, 11, 20))
+    sources = crossing.provider_uri / "_sources"
+    (sources / "cutover.txt").write_text("2026-11-23\n")
+    (sources / "earlier_cutovers.txt").write_text("2020-11-10\n")
+
+    assert "crosses 2020-11-10" in extension_warning(crossing)
+
+
 def test_a_test_period_after_the_extension_day_needs_no_warning(tmp_path):
     from rdagent.app.market_launcher import extension_warning
 

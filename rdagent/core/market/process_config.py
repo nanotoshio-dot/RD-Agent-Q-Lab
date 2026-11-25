@@ -9,6 +9,9 @@ from rdagent.core.market.trading_rules import TRADING_RULE_ENV_KEYS
 
 # Written by rdagent.app.us_market_data at the end of each build, relative to the provider.
 PROVIDER_BUILD_ID = Path("_sources") / "build_id.txt"
+# The last day of the data a build extended, and the same days of the builds its source went through.
+PROVIDER_CUTOVER = Path("_sources") / "cutover.txt"
+PROVIDER_EARLIER_CUTOVERS = Path("_sources") / "earlier_cutovers.txt"
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,16 @@ class MarketProcessConfig:
 def factor_data_universe(region: str, qlib_market: str) -> str:
     """The instruments generate.py loads; keep in sync with MARKET in factor_data_template/generate.py."""
     return "all" if region == "cn" else qlib_market
+
+
+def provider_cutovers(provider_uri: Path) -> list[str]:
+    """Every day where a build joined new data onto this provider, oldest first, as ISO dates."""
+    days: set[str] = set()
+    for name in (PROVIDER_EARLIER_CUTOVERS, PROVIDER_CUTOVER):
+        path = provider_uri / name
+        if path.is_file():
+            days.update(path.read_text().split())
+    return sorted(days)
 
 
 def _short_hash(values: Mapping[str, object]) -> str:

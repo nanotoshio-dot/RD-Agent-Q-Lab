@@ -18,6 +18,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from rdagent.core.market import MarketContext, MarketProcessConfig, TradingRules
+from rdagent.core.market.process_config import provider_cutovers
 from rdagent.core.market.runtime import ensure_docker_supports_market
 
 # First day of the factor data built by factor_data_template/generate.py; keep the two in sync.
@@ -145,16 +146,15 @@ def extension_warning(context: MarketContext) -> str | None:
 
     Members delisted after that day have no later prices, so positions held in them then cannot be sold.
     """
-    cutover_file = context.provider_uri / "_sources" / "cutover.txt"
-    if not cutover_file.is_file():
+    cutovers = [date.fromisoformat(day) for day in provider_cutovers(context.provider_uri)]
+    crossed = [cutover for cutover in cutovers if context.test_start <= cutover < context.test_end]
+    if not crossed:
         return None
-    cutover = date.fromisoformat(cutover_file.read_text().strip())
-    if context.test_start <= cutover < context.test_end:
-        return (
-            f"Warning: the test period crosses {cutover}, where this provider was extended. Members delisted "
-            f"after it have no later prices; start the test after {cutover} to avoid frozen positions."
-        )
-    return None
+    days = ", ".join(cutover.isoformat() for cutover in crossed)
+    return (
+        f"Warning: the test period crosses {days}, where this provider was extended. Members delisted "
+        f"after it have no later prices; start the test after {crossed[-1]} to avoid frozen positions."
+    )
 
 
 def build_child_environment(

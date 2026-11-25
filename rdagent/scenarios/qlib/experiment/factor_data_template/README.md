@@ -21,7 +21,7 @@ $close: close price of the stock on that day.
 $high: high price of the stock on that day.
 $low: low price of the stock on that day.
 $volume: volume of the stock on that day.
-$factor: price adjustment factor for splits and dividends (adjusted price / raw price). The prices above are already adjusted, so $factor is not a trading signal.
+$factor: the data provider's price adjustment factor. The prices above are already adjusted. Do not use $factor as a signal, and do not divide by it to rebuild raw prices.
 
 ## How to use daily_pv.h5
 - The index is a MultiIndex with the levels "datetime" and "instrument". They are index levels, not columns.
@@ -29,6 +29,9 @@ $factor: price adjustment factor for splits and dividends (adjusted price / raw 
 - Run rolling windows, shifts and other time-series operations on each instrument separately, for example
   `df.groupby(level="instrument")["$close"].transform(lambda s: s.rolling(20).mean())`.
   A plain `df["$close"].rolling(20)` mixes rows of different stocks.
+- Days without data are rows of NaN. Never fill them forward. For an n-day return write
+  `df.groupby(level="instrument")["$close"].transform(lambda s: s / s.shift(20) - 1)`.
+  `pct_change` fills the gaps by default and joins prices that are far apart.
 - Do not call set_index or reset_index: the index is already the ("datetime", "instrument") index that
   result.h5 needs.
 - Turn the factor series into the result with `series.to_frame("Factor_Name")`, as below.

@@ -149,7 +149,24 @@ def test_template_readme_names_the_columns_and_the_adjustment_factor():
 
     assert 'df["$close"], never df["close"]' in readme
     assert 'groupby(level="instrument")' in readme
-    assert "$factor: price adjustment factor" in readme
+    # True for every provider: the US factor holds dividends only, so it is not "adjusted / raw" there.
+    assert "$factor: the data provider's price adjustment factor" in readme
+    assert "do not divide by it to rebuild raw prices" in readme
+
+
+def test_the_readme_return_does_not_bridge_days_without_data():
+    # CEG's code holds one company until 2018 and another from 2022, with NaN rows between them.
+    readme = (TEMPLATE_DIR / "README.md").read_text()
+    advised = 'df.groupby(level="instrument")["$close"].transform(lambda s: s / s.shift(20) - 1)'
+    assert advised in readme
+    days = pd.date_range("2020-01-01", periods=61, name="datetime")
+    index = pd.MultiIndex.from_product([days, ["CEG"]], names=["datetime", "instrument"])
+    df = pd.DataFrame({"$close": [0.02] * 15 + [float("nan")] * 25 + [40.0] * 21}, index=index)
+
+    momentum = df.groupby(level="instrument")["$close"].transform(lambda s: s / s.shift(20) - 1)
+
+    assert momentum.iloc[:60].isna().all()  # no return joins the two companies
+    assert momentum.iloc[60] == 0.0
 
 
 def test_the_readme_example_writes_a_result_in_the_expected_format(tmp_path, monkeypatch):

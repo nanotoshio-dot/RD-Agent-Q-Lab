@@ -140,10 +140,12 @@ class FactorInfEvaluator(FactorEvaluator):
 
 
 class FactorEmptyValueEvaluator(FactorEvaluator):
-    """Catch a result without rows or with only NaN values.
+    """Name a result without rows or with only NaN values.
 
     The other checks describe such a result misleadingly (an empty frame has no datetime index), so a small
-    model chases the wrong problem.
+    model chases the wrong problem. A result without rows fails. One with only NaN values gets the feedback
+    but no verdict: the evaluation sample covers about two years, so a correct factor with a longer window
+    has no values there.
     """
 
     def evaluate(
@@ -166,7 +168,7 @@ class FactorEmptyValueEvaluator(FactorEvaluator):
             return (
                 "Every value in the source dataframe is NaN. A window longer than the evaluation data gives this; "
                 "otherwise check the implementation.",
-                False,
+                None,
             )
         return "The source dataframe has factor values.", True
 

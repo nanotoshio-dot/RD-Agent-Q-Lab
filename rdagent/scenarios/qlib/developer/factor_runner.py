@@ -12,7 +12,11 @@ from rdagent.app.qlib_rd_loop.conf import FactorBasePropSetting
 from rdagent.components.runner import CachedRunner
 from rdagent.core.exception import FactorEmptyError
 from rdagent.log import rdagent_logger as logger
-from rdagent.scenarios.qlib.developer.utils import process_factor_data
+from rdagent.scenarios.qlib.developer.utils import (
+    process_factor_data,
+    qlib_run_cache_key,
+    to_feature_frame,
+)
 from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment
 from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment
 
@@ -60,7 +64,7 @@ class QlibFactorRunner(CachedRunner[QlibFactorExperiment]):
         IC_max = IC_max.unstack().max(axis=0)
         return new_feature.iloc[:, IC_max[IC_max < 0.99].index]
 
-    @cache_with_pickle(CachedRunner.get_cache_key, CachedRunner.assign_cached_result)
+    @cache_with_pickle(qlib_run_cache_key, CachedRunner.assign_cached_result)
     def develop(self, exp: QlibFactorExperiment) -> QlibFactorExperiment:
         """
         Generate the experiment by processing and combining factor data,
@@ -108,15 +112,12 @@ class QlibFactorRunner(CachedRunner[QlibFactorExperiment]):
                     raise FactorEmptyError(
                         "The factors generated in this round are highly similar to the previous factors. Please change the direction for creating new factors."
                     )
-                combined_factors = pd.concat([SOTA_factor, new_factors], axis=1).dropna()
+                # A row one factor lacks keeps the others; the templates fill what is missing.
+                combined_factors = pd.concat([SOTA_factor, new_factors], axis=1)
             else:
                 combined_factors = new_factors
 
-            # Sort and nest the combined factors under 'feature'
-            combined_factors = combined_factors.sort_index()
-            combined_factors = combined_factors.loc[:, ~combined_factors.columns.duplicated(keep="last")]
-            new_columns = pd.MultiIndex.from_product([["feature"], combined_factors.columns])
-            combined_factors.columns = new_columns
+            combined_factors = to_feature_frame(combined_factors)
             logger.info(f"Factor data processing completed.")
 
             num_features = len(exp.base_features) + len(combined_factors.columns)
@@ -173,11 +174,7 @@ class QlibFactorRunner(CachedRunner[QlibFactorExperiment]):
         else:
             logger.info(f"Experiment execution ...")
             if exp.base_feature_codes:
-                factors = process_factor_data(exp)
-                factors = factors.sort_index()
-                factors = factors.loc[:, ~factors.columns.duplicated(keep="last")]
-                new_columns = pd.MultiIndex.from_product([["feature"], factors.columns])
-                factors.columns = new_columns
+                factors = to_feature_frame(process_factor_data(exp))
                 target_path = exp.experiment_workspace.workspace_path / "combined_factors_df.parquet"
                 # Save the combined factors to the workspace
                 factors.to_parquet(target_path, engine="pyarrow")

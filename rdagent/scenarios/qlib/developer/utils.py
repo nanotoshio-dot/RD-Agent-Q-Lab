@@ -1,14 +1,49 @@
+import json
 from typing import List
 
 import pandas as pd
 
 from rdagent.components.coder.CoSTEER.evaluators import CoSTEERMultiFeedback
 from rdagent.components.coder.factor_coder.factor import FactorFBWorkspace, FactorTask
+from rdagent.components.runner import CachedRunner
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.core.exception import FactorEmptyError
+from rdagent.core.experiment import Experiment
 from rdagent.core.utils import multiprocessing_wrapper
 from rdagent.log import rdagent_logger as logger
 from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment
+from rdagent.utils import md5_hash
+
+
+def qlib_run_cache_key(runner: CachedRunner, exp: Experiment) -> str:
+    """The cache key of a Qlib backtest: the tasks, and the templates the workspace is about to run.
+
+    CachedRunner.get_cache_key hashes the task descriptions only, so a result computed with an older template
+    would be returned after the template changed.
+    """
+    templates = {
+        name: content for name, content in exp.experiment_workspace.file_dict.items() if name.endswith(".yaml")
+    }
+    return md5_hash(runner.get_cache_key(exp) + json.dumps(templates, sort_keys=True))
+
+
+def to_feature_frame(factors: pd.DataFrame) -> pd.DataFrame:
+    """Factor columns as the Qlib templates read them from combined_factors_df.parquet.
+
+    Rows are sorted, the last column of a name wins and the columns are nested under "feature". The code of a
+    factor is written by the model, so values become float64: Qlib's normalization fails on other types, and
+    anything that is not a number is missing. A column that has no number left is named in a warning, because
+    the backtest fills it with zeros.
+    """
+    frame = factors.sort_index()
+    frame = frame.loc[:, ~frame.columns.duplicated(keep="last")]
+    # The mask keeps a missing date or duration missing: as a number it would be a huge negative value.
+    numbers = frame.apply(lambda column: pd.to_numeric(column, errors="coerce").astype("float64").mask(column.isna()))
+    lost = [str(name) for name in frame.columns if frame[name].notna().any() and not numbers[name].notna().any()]
+    if lost:
+        logger.warning(f"These factor columns hold no numbers and will be zero in the backtest: {', '.join(lost)}")
+    numbers.columns = pd.MultiIndex.from_product([["feature"], numbers.columns])
+    return numbers
 
 
 def _build_base_feature_workspaces(exp: QlibFactorExperiment) -> list[FactorFBWorkspace]:

@@ -8,6 +8,7 @@ from rdagent.core.experiment import Experiment
 from rdagent.core.proposal import Experiment2Feedback, HypothesisFeedback, Trace
 from rdagent.log import rdagent_logger as logger
 from rdagent.oai.llm_utils import APIBackend
+from rdagent.scenarios.qlib.developer.training_health import training_warning
 from rdagent.scenarios.qlib.experiment.quant_experiment import QlibQuantScenario
 from rdagent.utils import convert2bool
 from rdagent.utils.agent.tpl import T
@@ -98,6 +99,10 @@ class QlibFactorExperiment2Feedback(Experiment2Feedback):
 
         # Process the results to filter important metrics
         combined_result = process_results(current_result, sota_result)
+        for label, result in (("Current Result", current_result), ("SOTA Result", sota_result)):
+            warning = training_warning(result)
+            if warning:
+                combined_result += f"\n{label}: {warning}"
 
         # Generate the system prompt
         if isinstance(self.scen, QlibQuantScenario):

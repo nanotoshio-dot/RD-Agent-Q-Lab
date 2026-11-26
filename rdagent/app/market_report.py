@@ -25,9 +25,13 @@ METRICS = {
     "1day.excess_return_with_cost.information_ratio": "Information ratio with cost",
     "1day.excess_return_with_cost.max_drawdown": "Max drawdown with cost",
     "1day.excess_return_without_cost.annualized_return": "Excess return without cost",
+    "model.best_iteration": "Best boosting round",
+    "signal.median_distinct_scores": "Distinct scores a day",
+    "signal.topk_share_in_ties": "Top places decided by ties",
 }
 RETURN_WITH_COST = "1day.excess_return_with_cost.annualized_return"
 PERCENT = {name for name in METRICS if name.endswith(("annualized_return", "max_drawdown"))}
+COUNTS = {"model.best_iteration", "signal.median_distinct_scores"}
 JOURNAL_FIELDS = (
     "run",
     "loop",
@@ -197,6 +201,10 @@ READERS = {
 def show(name: str, value: float | None) -> str:
     if value is None:
         return ""
+    if name in COUNTS:
+        return f"{value:.0f}"
+    if name == "signal.topk_share_in_ties":
+        return f"{value:.0%}"
     return f"{value:+.2%}" if name in PERCENT else f"{value:.4f}"
 
 

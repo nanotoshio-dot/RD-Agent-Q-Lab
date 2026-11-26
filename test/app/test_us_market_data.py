@@ -745,6 +745,26 @@ def test_needed_members_left_behind_are_retried_and_a_few_are_accepted(tmp_path,
     assert "Warning: members without new data" in capsys.readouterr().out
 
 
+def test_a_single_stale_bar_without_an_earlier_file_is_not_data(tmp_path, capsys):
+    sources = tmp_path / "_sources"
+    for symbol in ["AAPL", *BENCHMARKS]:
+        write_raw(sources / "yahoo_raw", symbol, ["2020-11-03", "2026-11-23"])
+    spans = [(symbol, "1999-01-01", OPEN_END) for symbol in ("AAPL", "KVUE", "NEW")]
+    spans.append(("EA", "1999-01-01", "2026-08-04"))
+    symbols = sorted(["AAPL", "EA", "KVUE", "NEW", *BENCHMARKS])
+    answers = {symbol: FULL for symbol in ["AAPL", *BENCHMARKS]}
+    # Yahoo's one stale quote for two delisted tickers, and the first bar of a company listed on the end day.
+    answers.update(KVUE=["2026-10-30"], EA=["2026-08-04"], NEW=[END])
+
+    refresh_raw_files(sources, None, symbols, spans, END, fake_yahoo(sources, answers, []))
+
+    assert sorted(raw_last_days(sources / "yahoo_raw")) == sorted(["AAPL", "NEW", *BENCHMARKS])
+    assert (sources / UNREFRESHED).read_text() == "KVUE\n"
+    output = capsys.readouterr().out
+    assert "Only a single stale bar for 2 symbols, taken as no data: EA, KVUE" in output
+    assert "Warning: members without new data, retried by the next build: KVUE" in output
+
+
 def test_symbols_a_refresh_left_behind_are_retried_by_later_runs(tmp_path):
     sources, reused = tmp_path / "target" / "_sources", tmp_path / "earlier" / "_sources"
     for folder in (sources, reused / "yahoo_raw"):

@@ -881,6 +881,25 @@ def restore_unrefreshed(raw_dir: Path, aside: Path, *, keep: bool = False) -> li
     return sorted(restored)
 
 
+def discard_single_stale_bars(raw_dir: Path, symbols: list[str], end: str) -> list[str]:
+    """Delete the raw files that hold one bar from before ``end``, and return their symbols.
+
+    For a ticker that left the exchange Yahoo may answer with a single stale quote. Without an earlier file to
+    keep, restore_unrefreshed lets it through, and the symbol would count as having data. The only bar of a new
+    listing is the last trading day, so it is kept.
+    """
+    wanted = last_business_day(end)
+    stale = []
+    for symbol in symbols:
+        path = raw_dir / f"{symbol}.csv"
+        if path.is_file():
+            days = raw_days(path)
+            if len(days) == 1 and days.iloc[0] < wanted:
+                path.unlink()
+                stale.append(symbol)
+    return sorted(stale)
+
+
 UNREFRESHED = "unrefreshed.txt"  # in _sources: symbols a refresh left behind, retried by later runs
 
 
@@ -987,6 +1006,9 @@ def refresh_raw_files(
     unrefreshed = restore_unrefreshed(raw_dir, aside)
     if unrefreshed:
         print(f"Yahoo returned nothing usable for {len(unrefreshed)} stale symbols; their earlier files are kept")
+    single = discard_single_stale_bars(raw_dir, symbols, end)
+    if single:
+        print(f"Only a single stale bar for {len(single)} symbols, taken as no data: {', '.join(single[:20])}")
     no_file = [symbol for symbol in needed if not (raw_dir / f"{symbol}.csv").exists()]
     left_behind = sorted(set(unrefreshed) | set(no_file))
     (sources / UNREFRESHED).write_text("".join(f"{symbol}\n" for symbol in left_behind))

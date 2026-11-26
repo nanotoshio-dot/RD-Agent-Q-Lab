@@ -13,8 +13,8 @@ import os
 import re
 import select
 import shutil
-import sys
 import subprocess
+import sys
 import time
 import uuid
 import zipfile
@@ -845,6 +845,7 @@ class DockerConf(EnvConf):
             ]
         return self
 
+
 class QlibLocalConf(LocalConf):
     default_entry: str = "qrun conf.yaml"
     enable_cache: bool = False
@@ -853,7 +854,10 @@ class QlibLocalConf(LocalConf):
 
 class QlibLocalEnv(LocalEnv[QlibLocalConf]):
     """Qlib environment using the active Python virtual environment."""
+
     pass
+
+
 class QlibCondaConf(CondaConf):
     conda_env_name: str = "rdagent4qlib"
     enable_cache: bool = False

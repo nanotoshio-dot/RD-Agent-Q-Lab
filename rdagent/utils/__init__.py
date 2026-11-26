@@ -130,6 +130,11 @@ def filter_redundant_text(stdout: str) -> str:
         [line for line in filtered_stdout_lines if lines_to_count[line] <= max(len(filtered_stdout_lines) // 10, 10)]
     )
 
+    from rdagent.core.conf import RD_AGENT_SETTINGS  # avoid circular import
+
+    if not RD_AGENT_SETTINGS.stdout_llm_filter:
+        return filtered_stdout
+
     def _shrink_stdout_once(stdout: str) -> str:
         head = stdout[: int(APIBackend().chat_token_limit * 0.3)]
         tail = stdout[-int(APIBackend().chat_token_limit * 0.3) :]

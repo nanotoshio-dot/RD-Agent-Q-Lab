@@ -4,7 +4,7 @@ from typing import Optional
 from pydantic_settings import SettingsConfigDict
 
 from rdagent.components.coder.CoSTEER.config import CoSTEERSettings
-from rdagent.utils.env import CondaConf, Env, LocalEnv
+from rdagent.utils.env import CondaConf, Env, LocalEnv, QlibLocalConf, QlibLocalEnv
 
 
 class FactorCoSTEERSettings(CoSTEERSettings):
@@ -37,7 +37,12 @@ def get_factor_env(
 ) -> Env:
     conf = FactorCoSTEERSettings()
     if hasattr(conf, "python_bin"):
-        env = LocalEnv(conf=(CondaConf(conda_env_name=os.environ.get("CONDA_DEFAULT_ENV"))))
+        conda_env_name = os.environ.get("CONDA_DEFAULT_ENV")
+        if conda_env_name:
+            env = LocalEnv(conf=CondaConf(conda_env_name=conda_env_name))
+        else:
+            # No active conda environment: run with the current Python environment.
+            env = QlibLocalEnv(conf=QlibLocalConf())
     env.conf.extra_volumes = extra_volumes.copy()
     env.conf.running_timeout_period = running_timeout_period
     if enable_cache is not None:

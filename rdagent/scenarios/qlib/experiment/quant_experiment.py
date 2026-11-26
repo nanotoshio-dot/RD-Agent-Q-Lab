@@ -1,3 +1,4 @@
+import os
 from copy import deepcopy
 from pathlib import Path
 
@@ -20,7 +21,10 @@ from rdagent.components.coder.model_coder.model import (
 )
 from rdagent.core.experiment import Task
 from rdagent.core.scenario import Scenario
-from rdagent.scenarios.qlib.experiment.utils import get_data_folder_intro
+from rdagent.scenarios.qlib.experiment.utils import (
+    get_data_folder_intro,
+    get_market_prompt_note,
+)
 from rdagent.scenarios.qlib.experiment.workspace import QlibFBWorkspace
 from rdagent.scenarios.shared.get_runtime_info import get_runtime_environment_by_env
 from rdagent.utils.agent.tpl import T
@@ -41,11 +45,18 @@ class QlibModelExperiment(ModelExperiment[ModelTask, QlibFBWorkspace, ModelFBWor
 class QlibQuantScenario(Scenario):
     def __init__(self) -> None:
         super().__init__()
+        # Every prompt that describes the scenario includes the source data, so the market goes there.
+        self.market_prompt_note = get_market_prompt_note()
         self._source_data = deepcopy(get_data_folder_intro())
+        if self.market_prompt_note is not None:
+            self._source_data = f"{self.market_prompt_note}\n{self._source_data}"
 
         self._rich_style_description = deepcopy(T(".prompts:qlib_factor_rich_style_description").r())
+        # Shown in the logs and UI only; None keeps the template's CSI300 label.
+        dataset = None if self.market_prompt_note is None else os.environ["RD_MARKET_QLIB_MARKET"].upper()
         self._experiment_setting = deepcopy(
             T(".prompts:qlib_factor_experiment_setting").r(
+                dataset=dataset,
                 train_start=QUANT_PROP_SETTING.train_start,
                 train_end=QUANT_PROP_SETTING.train_end,
                 valid_start=QUANT_PROP_SETTING.valid_start,

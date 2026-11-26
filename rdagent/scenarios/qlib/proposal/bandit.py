@@ -19,17 +19,26 @@ class Metrics:
     sharpe: float = 0.0
 
     def as_vector(self) -> np.ndarray:
-        return np.array(
-            [
-                self.ic,
-                self.icir,
-                self.rank_ic,
-                self.rank_icir,
-                self.arr,
-                self.ir,
-                -self.mdd,
-                self.sharpe,
-            ]
+        # Higher is better for every entry. Qlib reports the drawdown as a negative number, so it goes in
+        # as it is: it used to be negated, which paid for a deeper drawdown. A NaN metric counts as 0;
+        # otherwise it would spread through the bandit's posterior and fix its choice.
+        return np.nan_to_num(
+            np.array(
+                [
+                    self.ic,
+                    self.icir,
+                    self.rank_ic,
+                    self.rank_icir,
+                    self.arr,
+                    self.ir,
+                    self.mdd,
+                    self.sharpe,
+                ],
+                dtype=float,
+            ),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
         )
 
 
@@ -41,7 +50,7 @@ def extract_metrics_from_experiment(experiment) -> Metrics:
         icir = result.get("ICIR", 0.0)
         rank_ic = result.get("Rank IC", 0.0)
         rank_icir = result.get("Rank ICIR", 0.0)
-        arr = result.get("1day.excess_return_with_cost.annualized_return ", 0.0)
+        arr = result.get("1day.excess_return_with_cost.annualized_return", 0.0)
         ir = result.get("1day.excess_return_with_cost.information_ratio", 0.0)
         mdd = result.get("1day.excess_return_with_cost.max_drawdown", 1.0)  # Avoid division by zero
         sharpe = arr / -mdd if mdd != 0 else 0.0

@@ -83,6 +83,9 @@ class RDAgentSettings(ExtendedBaseSettings):
     """The limitation of context stdout"""
     stdout_context_len: int = 400
     stdout_line_len: int = 10000
+    # Each run's stdout is trimmed with regexes the LLM writes, in up to three calls. A local CPU model can
+    # spend many minutes per call, so it can be switched off; the fixed filters and the shrinking remain.
+    stdout_llm_filter: bool = True
 
     enable_mlflow: bool = False
 

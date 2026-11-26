@@ -708,7 +708,7 @@ class APIBackend(ABC):
             all_response = parser.parse(all_response)
             if json_target_type:
                 # deepseek will enter this branch
-                TypeAdapter(json_target_type).validate_json(all_response)
+                TypeAdapter(cast(Any, json_target_type)).validate_json(all_response)
 
         # 4) code block extraction
         if code_block_language:

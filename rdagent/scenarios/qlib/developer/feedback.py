@@ -8,6 +8,7 @@ from rdagent.core.experiment import Experiment
 from rdagent.core.proposal import Experiment2Feedback, HypothesisFeedback, Trace
 from rdagent.log import rdagent_logger as logger
 from rdagent.oai.llm_utils import APIBackend
+from rdagent.scenarios.qlib.developer.training_health import training_warning
 from rdagent.scenarios.qlib.experiment.quant_experiment import QlibQuantScenario
 from rdagent.utils import convert2bool
 from rdagent.utils.agent.tpl import T
@@ -19,6 +20,31 @@ IMPORTANT_METRICS = [
     "1day.excess_return_with_cost.annualized_return",
     "1day.excess_return_with_cost.max_drawdown",
 ]
+
+
+# The words convert2bool accepts.
+YES_WORDS = {"true", "yes", "ok"}
+NO_WORDS = {"false", "no"}
+
+
+def decision_from_llm(value: object, default: bool = False) -> bool:
+    """Read the LLM's decision; an answer that is not a clear yes or no counts as ``default``.
+
+    A small model may answer "Yes." or a whole sentence. ``convert2bool`` raises on those, and the loop
+    does not skip that error, so one such answer would end a multi-loop run. A sentence counts by its
+    first word, unless it holds both a yes and a no, as the echoed template "yes or no" does.
+    """
+    words = "".join(ch if ch.isalpha() else " " for ch in str(value).lower()).split()
+    candidates = [value]
+    if not (set(words) & YES_WORDS and set(words) & NO_WORDS):
+        candidates.append(words[0] if words else "")
+    for candidate in candidates:
+        try:
+            return convert2bool(candidate)  # type: ignore[arg-type]
+        except ValueError:
+            continue
+    logger.warning(f"Unclear decision {value!r} from the LLM; using {default}")
+    return default
 
 
 def process_results(current_result, sota_result):
@@ -73,6 +99,10 @@ class QlibFactorExperiment2Feedback(Experiment2Feedback):
 
         # Process the results to filter important metrics
         combined_result = process_results(current_result, sota_result)
+        for label, result in (("Current Result", current_result), ("SOTA Result", sota_result)):
+            warning = training_warning(result)
+            if warning:
+                combined_result += f"\n{label}: {warning}"
 
         # Generate the system prompt
         if isinstance(self.scen, QlibQuantScenario):
@@ -107,7 +137,7 @@ class QlibFactorExperiment2Feedback(Experiment2Feedback):
         hypothesis_evaluation = response_json.get("Feedback for Hypothesis", "No feedback provided")
         new_hypothesis = response_json.get("New Hypothesis", "No new hypothesis provided")
         reason = response_json.get("Reasoning", "No reasoning provided")
-        decision = convert2bool(response_json.get("Replace Best Result", "no"))
+        decision = decision_from_llm(response_json.get("Replace Best Result", "no"))
 
         return HypothesisFeedback(
             observations=observations,
@@ -164,23 +194,13 @@ class QlibModelExperiment2Feedback(Experiment2Feedback):
             json_target_type=Dict[str, str | bool | int],
         )
 
-        # Parse the JSON response to extract the feedback
+        # Parse the JSON response to extract the feedback. The same question used to be asked a second
+        # time, and the first answer thrown away.
         response_json_hypothesis = json.loads(response)
-
-        # Call the APIBackend to generate the response for hypothesis feedback
-        response_hypothesis = APIBackend().build_messages_and_create_chat_completion(
-            user_prompt=user_prompt,
-            system_prompt=sys_prompt,
-            json_mode=True,
-            json_target_type=Dict[str, str | bool | int],
-        )
-
-        # Parse the JSON response to extract the feedback
-        response_json_hypothesis = json.loads(response_hypothesis)
         return HypothesisFeedback(
             observations=response_json_hypothesis.get("Observations", "No observations provided"),
             hypothesis_evaluation=response_json_hypothesis.get("Feedback for Hypothesis", "No feedback provided"),
             new_hypothesis=response_json_hypothesis.get("New Hypothesis", "No new hypothesis provided"),
             reason=response_json_hypothesis.get("Reasoning", "No reasoning provided"),
-            decision=convert2bool(response_json_hypothesis.get("Decision", "false")),
+            decision=decision_from_llm(response_json_hypothesis.get("Decision", "false")),
         )

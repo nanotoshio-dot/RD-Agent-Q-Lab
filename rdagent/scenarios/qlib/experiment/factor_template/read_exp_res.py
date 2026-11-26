@@ -1,3 +1,4 @@
+import os
 import pickle
 from pathlib import Path
 
@@ -5,6 +6,7 @@ import pandas as pd
 import qlib
 from mlflow.entities import ViewType
 from mlflow.tracking import MlflowClient
+from model_health import best_iteration, ranking_stats
 
 qlib.init()
 
@@ -45,6 +47,17 @@ else:
 
     # Load the specified file from the latest recorder
     metrics = pd.Series(latest_recorder.list_metrics())
+
+    # How much the model ranks. The backtest figures stand without these.
+    try:
+        rounds = best_iteration(latest_recorder.client.get_metric_history(latest_recorder.id, "l2.valid"))
+        if rounds is not None:
+            metrics["model.best_iteration"] = rounds
+        topk = int(os.environ.get("RD_MARKET_TOPK") or 50)
+        for name, value in ranking_stats(latest_recorder.load_object("pred.pkl"), topk).items():
+            metrics[name] = value
+    except Exception as e:
+        print(f"Model health not measured: {e}")
 
     output_path = Path(__file__).resolve().parent / "qlib_res.csv"
     metrics.to_csv(output_path)

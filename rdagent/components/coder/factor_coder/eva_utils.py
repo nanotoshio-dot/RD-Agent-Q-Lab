@@ -139,6 +139,40 @@ class FactorInfEvaluator(FactorEvaluator):
             )
 
 
+class FactorEmptyValueEvaluator(FactorEvaluator):
+    """Name a result without rows or with only NaN values.
+
+    The other checks describe such a result misleadingly (an empty frame has no datetime index), so a small
+    model chases the wrong problem. A result without rows fails. One with only NaN values gets the feedback
+    but no verdict: the evaluation sample covers about two years, so a correct factor with a longer window
+    has no values there.
+    """
+
+    def evaluate(
+        self,
+        implementation: Workspace,
+        gt_implementation: Workspace,
+    ) -> Tuple[str, object]:
+        _, gen_df = self._get_df(gt_implementation, implementation)
+        if gen_df is None:
+            return "The source dataframe is None. Please check the implementation.", False
+        if gen_df.empty:
+            return (
+                "The source dataframe has no rows: every factor value was lost before saving. A common cause is "
+                "pd.DataFrame(series, columns=[name]), which keeps no data when the series has another name; "
+                "series.to_frame(name) keeps it. Dropping NaN after a window longer than the evaluation data "
+                "also leaves no rows.",
+                False,
+            )
+        if gen_df.isna().all().all():
+            return (
+                "Every value in the source dataframe is NaN. A window longer than the evaluation data gives this; "
+                "otherwise check the implementation.",
+                None,
+            )
+        return "The source dataframe has factor values.", True
+
+
 class FactorSingleColumnEvaluator(FactorEvaluator):
     def evaluate(
         self,
@@ -160,11 +194,27 @@ class FactorSingleColumnEvaluator(FactorEvaluator):
             )
 
 
+QLIB_FACTOR_INDEX = ["datetime", "instrument"]
+
+
+def qlib_format_problems(gen_df: pd.DataFrame) -> list[str]:
+    """What is wrong with the structure of a Qlib factor result; empty when it is right."""
+    problems = []
+    if list(gen_df.index.names) != QLIB_FACTOR_INDEX:
+        problems.append(f"The index levels are {list(gen_df.index.names)}, but they must be {QLIB_FACTOR_INDEX}.")
+    if len(gen_df.columns) != 1:
+        problems.append(f"There are {len(gen_df.columns)} columns; there must be one, named after the factor.")
+    elif not pd.api.types.is_numeric_dtype(gen_df.iloc[:, 0]):
+        problems.append(f"The column has dtype {gen_df.dtypes.iloc[0]}, but factor values must be numeric.")
+    return problems
+
+
 class FactorOutputFormatEvaluator(FactorEvaluator):
     def evaluate(
         self,
         implementation: Workspace,
         gt_implementation: Workspace,
+        check_qlib_structure: bool = False,
     ) -> Tuple[str, object]:
         gt_df, gen_df = self._get_df(gt_implementation, implementation)
         if gen_df is None:
@@ -172,6 +222,13 @@ class FactorOutputFormatEvaluator(FactorEvaluator):
                 "The source dataframe is None. Skip the evaluation of the output format.",
                 False,
             )
+        if check_qlib_structure:
+            # A Qlib result's structure can be checked exactly. An LLM judging it from df.info() can invent
+            # problems: qwen2.5-coder 7B asked to rename a column to the name it already had.
+            problems = qlib_format_problems(gen_df)
+            if problems:
+                return " ".join(problems), False
+            return "The output format is correct: a (datetime, instrument) index and one numeric column.", True
         buffer = io.StringIO()
         gen_df.info(buf=buffer)
         gen_df_info_str = f"The user is currently working on a feature related task.\nThe output dataframe info is:\n{buffer.getvalue()}"
@@ -404,6 +461,12 @@ class FactorValueEvaluator(FactorEvaluator):
         high_correlation_result = False
         row_result = None
 
+        # Qlib factors only: the other scenario's results were never run through this check.
+        has_values = None
+        if version == 1:
+            feedback_str, has_values = FactorEmptyValueEvaluator(self.scen).evaluate(implementation, gt_implementation)
+            conclusions.append(feedback_str)
+
         # Check if both dataframe has only one columns Mute this since factor task might generate more than one columns now
         if version == 1:
             feedback_str, _ = FactorSingleColumnEvaluator(self.scen).evaluate(implementation, gt_implementation)
@@ -420,7 +483,9 @@ class FactorValueEvaluator(FactorEvaluator):
         conclusions.append(feedback_str)
 
         # Check if the index of the dataframe is ("datetime", "instrument")
-        feedback_str, _ = FactorOutputFormatEvaluator(self.scen).evaluate(implementation, gt_implementation)
+        feedback_str, _ = FactorOutputFormatEvaluator(self.scen).evaluate(
+            implementation, gt_implementation, check_qlib_structure=version == 1
+        )
         conclusions.append(feedback_str)
         if version == 1:
             feedback_str, daily_check_result = FactorDatetimeDailyEvaluator(self.scen).evaluate(
@@ -468,6 +533,7 @@ class FactorValueEvaluator(FactorEvaluator):
             or output_format_result is False
             or daily_check_result is False
             or inf_evaluate_res is False
+            or has_values is False
         ):
             decision_from_value_check = False
         else:

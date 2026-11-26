@@ -1,27 +1,50 @@
+import os
+
 import qlib
 
-qlib.init(provider_uri="~/.qlib/qlib_data/cn_data")
+# The market launcher sets these; without them this is the original China setup.
+REGION = os.environ.get("RD_MARKET_REGION") or "cn"
+qlib.init(provider_uri=os.environ.get("RD_MARKET_PROVIDER_URI") or "~/.qlib/qlib_data/cn_data", region=REGION)
 
 from qlib.data import D
 
-instruments = D.instruments()
+# Keep in sync with FACTOR_DATA_START in rdagent/app/market_launcher.py.
+DATA_START = "2008-12-29"
+
+# China keeps the whole market. The US provider only extends index members past 2020-11-10, so "all" would
+# shrink from about 8,800 names to about 600 there. US markets load every code that was an index member at
+# some point since DATA_START, with its full history: a market filter would keep only member days, cutting
+# each stock's history at its entry and joining spans years apart. The model's dataset applies membership.
+# Keep in sync with factor_data_universe in rdagent/core/market/process_config.py.
+MARKET = "all" if REGION == "cn" else os.environ.get("RD_MARKET_QLIB_MARKET") or "all"
+if MARKET == "all":
+    instruments = D.instruments(MARKET)
+else:
+    instruments = D.list_instruments(D.instruments(MARKET), start_time=DATA_START, as_list=True)
 fields = ["$open", "$close", "$high", "$low", "$volume", "$factor"]
-data = D.features(instruments, fields, freq="day").swaplevel().sort_index().loc["2008-12-29":].sort_index()
+# Raw fields need no history, so loading from DATA_START gives the same rows as slicing afterwards.
+data = (
+    D.features(instruments, fields, start_time=DATA_START, freq="day")
+    .swaplevel()
+    .sort_index()
+    .loc[DATA_START:]
+    .sort_index()
+)
+if data.empty:
+    raise SystemExit(f"The provider has no price data from {DATA_START}")
 
 data.to_hdf("./daily_pv_all.h5", key="data")
 
 
 fields = ["$open", "$close", "$high", "$low", "$volume", "$factor"]
-data = (
-    (
-        D.features(instruments, fields, start_time="2018-01-01", end_time="2019-12-31", freq="day")
-        .swaplevel()
-        .sort_index()
-    )
-    .swaplevel()
-    .loc[data.reset_index()["instrument"].unique()[:100]]
-    .swaplevel()
-    .sort_index()
+debug_data = (
+    D.features(instruments, fields, start_time="2018-01-01", end_time="2019-12-31", freq="day").swaplevel().sort_index()
 )
+# Instruments delisted before the debug window have no rows in it.
+available = set(debug_data.index.get_level_values("instrument"))
+debug_instruments = [i for i in data.index.get_level_values("instrument").unique() if i in available][:100]
+if not debug_instruments:
+    raise SystemExit("No instrument has price data in the 2018-2019 debug window")
+data = debug_data.swaplevel().loc[debug_instruments].swaplevel().sort_index()
 
 data.to_hdf("./daily_pv_debug.h5", key="data")

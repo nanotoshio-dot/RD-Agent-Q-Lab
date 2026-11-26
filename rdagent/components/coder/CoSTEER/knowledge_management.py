@@ -87,8 +87,13 @@ class CoSTEERRAGStrategy(RAGStrategy):
         else:
             if not self.dump_knowledge_base_path.parent.exists():
                 self.dump_knowledge_base_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.dump_knowledge_base_path, "wb") as f:
+            # Written beside the file and moved into place. This file is the only copy of what the coder
+            # learned, and writing into it would leave it cut off when a run is stopped during the write.
+            target = Path(self.dump_knowledge_base_path)
+            partial = target.with_name(target.name + ".partial")
+            with open(partial, "wb") as f:
                 secure_pickle_dump(self.knowledgebase, f)
+            partial.replace(target)
 
     def load_dumped_knowledge_base(self, *args, **kwargs):
         if self.dump_knowledge_base_path is None:

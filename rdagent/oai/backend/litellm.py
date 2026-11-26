@@ -1,4 +1,5 @@
 import copyreg
+from collections.abc import Mapping
 from typing import Any, Literal, Optional, Type, TypedDict, Union, cast
 
 import numpy as np
@@ -43,6 +44,23 @@ class LiteLLMSettings(LLMSettings):
 
 LITELLM_SETTINGS = LiteLLMSettings()
 ACC_COST = 0.0
+
+
+def input_token_limit(model_info: Optional[Mapping[str, Any]], fallback: int) -> int:
+    """Input room left in the model window after reserving the maximum output.
+
+    Some providers (Ollama, for example) report one shared window as both the input and the output limit,
+    which leaves no input room at all. Every prompt would then count as too long and be cut to nothing,
+    so such reports fall back to the configured limit.
+    """
+    if not model_info:
+        return fallback
+    max_input = model_info.get("max_input_tokens")
+    max_output = model_info.get("max_output_tokens")
+    if max_input is None or max_output is None:
+        return fallback
+    room = int(max_input) - int(max_output)
+    return room if room > 0 else fallback
 
 
 class LiteLLMAPIBackend(APIBackend):
@@ -232,18 +250,12 @@ class LiteLLMAPIBackend(APIBackend):
     @property
     def chat_token_limit(self) -> int:
         """Suggest an input token limit, ensuring enough space in the context window for the maximum output tokens."""
+        # An explicit CHAT_TOKEN_LIMIT wins: the served context can be smaller than the advertised one
+        # (Ollama runs a model with its own num_ctx).
+        if "chat_token_limit" in LITELLM_SETTINGS.model_fields_set:
+            return LITELLM_SETTINGS.chat_token_limit
         try:
             model_info = get_model_info(LITELLM_SETTINGS.chat_model)
-            if model_info is None:
-                return super().chat_token_limit
-
-            max_input = model_info.get("max_input_tokens")
-            max_output = model_info.get("max_output_tokens")
-
-            if max_input is None or max_output is None:
-                return super().chat_token_limit
-
-            max_input_tokens = max_input - max_output
-            return max_input_tokens
-        except Exception as e:
+        except Exception:
             return super().chat_token_limit
+        return input_token_limit(model_info, fallback=super().chat_token_limit)

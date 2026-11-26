@@ -1,12 +1,14 @@
-import pandas as pd
-
 from rdagent.app.qlib_rd_loop.conf import ModelBasePropSetting
 from rdagent.components.runner import CachedRunner
 from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.core.exception import ModelEmptyError
 from rdagent.core.utils import cache_with_pickle
 from rdagent.log import rdagent_logger as logger
-from rdagent.scenarios.qlib.developer.utils import process_factor_data
+from rdagent.scenarios.qlib.developer.utils import (
+    process_factor_data,
+    qlib_run_cache_key,
+    to_feature_frame,
+)
 from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment
 from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment
 
@@ -24,7 +26,7 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
     - let LLM modify model.py
     """
 
-    @cache_with_pickle(CachedRunner.get_cache_key, CachedRunner.assign_cached_result)
+    @cache_with_pickle(qlib_run_cache_key, CachedRunner.assign_cached_result)
     def develop(self, exp: QlibModelExperiment) -> QlibModelExperiment:
         if exp.based_experiments and exp.based_experiments[-1].result is None:
             exp.based_experiments[-1] = self.develop(exp.based_experiments[-1])
@@ -42,11 +44,7 @@ class QlibModelRunner(CachedRunner[QlibModelExperiment]):
 
             if SOTA_factor is not None and not SOTA_factor.empty:
                 exist_sota_factor_exp = True
-                combined_factors = SOTA_factor
-                combined_factors = combined_factors.sort_index()
-                combined_factors = combined_factors.loc[:, ~combined_factors.columns.duplicated(keep="last")]
-                new_columns = pd.MultiIndex.from_product([["feature"], combined_factors.columns])
-                combined_factors.columns = new_columns
+                combined_factors = to_feature_frame(SOTA_factor)
                 num_features = str(len(exp.base_features) + len(combined_factors.columns))
 
                 target_path = exp.experiment_workspace.workspace_path / "combined_factors_df.parquet"

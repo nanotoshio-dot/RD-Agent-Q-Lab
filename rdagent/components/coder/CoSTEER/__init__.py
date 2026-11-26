@@ -106,6 +106,10 @@ class CoSTEER(Developer[Experiment]):
             filelock_path=self.settings.filelock_path,
             stop_eval_chain_on_fail=self.stop_eval_chain_on_fail,
         )
+        # The new agent's trace starts empty, so knowledge generation must restart at its first step. The
+        # counter used to keep the length of the previous develop's trace: from the second develop on, the
+        # first step never became knowledge, and the second attempt got no former attempt or feedback.
+        self.rag.current_generated_trace_count = 0
 
         # Evolving the solution
         start_datetime = datetime.now()

@@ -18,6 +18,8 @@ jobs:
           cache: pip
           python-version: ${{ matrix.python-version }}
       - run: make dev
+      - name: Diagnose isort import ordering
+        run: python -m isort --diff rdagent/oai/backend/ollama_backend.py rdagent/core/market/process_config.py
       - name: lint test docs and build
         run: make lint docs-gen test-offline # test docs build
     strategy:

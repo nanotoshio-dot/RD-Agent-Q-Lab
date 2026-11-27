@@ -64,14 +64,41 @@ audit: benchmarks complete to 2026-11-25; no misaligned series, non-positive clo
 securities; 2 open/high/low/close violations, the same plan and the same cut series as the previous build; 499
 of 499 priced S&P 500 members on 2026-11-25 (503 in the membership source) and 100 of 100 for the Nasdaq-100;
 member days up by 998 (S&P 500) and 200 (Nasdaq-100), two for each current member; no file ends earlier or has
-fewer rows than before. KVUE, PSKY and WBD still have no data. This provider has not replaced the one in use.
+fewer rows than before. KVUE, PSKY and WBD still have no data. It replaced the provider in use later the same
+day.
+
+## Out-of-sample test, China 2025-2026
+
+No saved run had used 2025-01-02 to 2026-11-18. The rule was written down before the result: the unchanged
+baseline (Alpha20 and the template's LightGBM, trained on 2010-2017, validated on 2018-2019, top 50 with 5
+replaced a day, with costs) passes only if its yearly net return beats (a) all CSI300 members in equal parts, with
+dividends and without costs, (b) the CSI300 price index and (c) at least 9 of 10 portfolios with random scores
+under the same rules and costs. A second backtest from the saved predictions repeated the template's daily
+returns.
+
+| 454 days | A year | 2025 | 2026 (to 11-18) | Worst drop |
+| --- | --- | --- | --- | --- |
+| Baseline, with cost | +1.66% | +27.4% | -19.1% | -26.4% |
+| Members in equal parts | +3.41% | +18.9% | -10.4% | -16.2% |
+| CSI300 index | +0.66% | +17.7% | -14.0% | -21.4% |
+
+The baseline beat the index but not the equal-weight members, and only 2 of the 10 random portfolios (-1.6% to
++8.2% a year). **It failed: no advantage has been demonstrated.** The daily excess over the equal-weight members
+is not distinguishable from zero (t = -0.12).
+
+## Signals in MetaTrader 5
+
+`tools/rd_mt5` ranks the US S&P 500 with the same baseline on the data in use, and has two experts that run only
+on demo accounts: one records what it would do and has no order code, the other sends minimum-size orders with
+stops and limits once the user switches orders on. A daily updater rebuilds the data and publishes the ranking.
+The ranking has shown no advantage; these tools exercise the pipeline.
 
 ## Open points
 
 - **LightGBM settings.** The template values come from Qlib's China benchmark. A selection protocol that uses the
   validation period only, with rules fixed before the first fit, was prepared and not run.
-- **Test periods have been used many times** (China 2020-2024, US 2021-2026). China 2025-01 to 2026-11 has not
-  been used by any saved run.
+- **Test periods have been used many times** (China 2020-2024, US 2021-2026, and now China 2025-01 to 2026-11 by
+  the test above).
 - **Backtest limits.** The benchmarks are price indexes while stock prices include dividends, which overstates
   the excess return; there is no slippage; the US data lack companies delisted after 2020.
 - `model_runner.py` ignores a single accepted factor experiment (`> 1`).

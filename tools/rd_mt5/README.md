@@ -49,17 +49,32 @@ hours, mostly Yahoo downloads), keeps the data in use unless the build finishes 
 previous version as `us_data_2026_anterior`, postpones the swap while research or another reader is running, and
 deletes only folders it created. It needs 6 GB free. Logs are in `~/.rdagent/rd_mt5`.
 
-Schedule it from PowerShell (replace the distribution, user and path), at a time before the US market opens:
+Schedule it from PowerShell (replace `<distro>`, `<user>` and `<path>`), at a time before the US market opens.
+A running task does not keep Windows awake, so the task runs a small script that asks Windows not to sleep while
+the update runs:
 
 ```powershell
-$a = New-ScheduledTaskAction -Execute "wsl.exe" -Argument "-d <distro> -u <user> -e <path>/tools/rd_mt5/auto_atualizar.sh"
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\RD" | Out-Null
+@'
+# keeps Windows from sleeping while the update runs
+Add-Type -Name Energy -Namespace RD -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);'
+[RD.Energy]::SetThreadExecutionState([uint32]2147483649) | Out-Null
+wsl.exe -d <distro> -u <user> -e <path>/tools/rd_mt5/auto_atualizar.sh
+exit $LASTEXITCODE
+'@ | Set-Content -Encoding ASCII "$env:LOCALAPPDATA\RD\atualizar.ps1"
+$a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$env:LOCALAPPDATA\RD\atualizar.ps1`""
 $t = New-ScheduledTaskTrigger -Daily -At 07:00
 $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 4)
 Register-ScheduledTask -TaskName "RD sinais" -Action $a -Trigger $t -Settings $s
+Start-ScheduledTask -TaskName "RD sinais"   # first run now
 ```
 
-The task runs while the user is logged on, and the computer must stay awake until it finishes; a missed run starts
-when the computer is back. Remove it with `Unregister-ScheduledTask -TaskName "RD sinais" -Confirm:$false`.
+The task runs while the user is logged on (a locked screen counts). Closing the lid or pressing the power button
+still suspends the computer, so keep it open and plugged in. A run missed while the computer was off or asleep
+starts some minutes after it is available again; after logging off, start it by hand with
+`Start-ScheduledTask -TaskName "RD sinais"`. The last result is in `Get-ScheduledTaskInfo -TaskName "RD sinais"`
+and in `~/.rdagent/rd_mt5/auto_atualizar.log`. Remove it with
+`Unregister-ScheduledTask -TaskName "RD sinais" -Confirm:$false`.
 
 **Known limit:** the data builder stops when more than a few current index members (1% of those it needs, at least
 2) get no data from Yahoo. Three members already get none (KVUE, PSKY, WBD on 2026-11-26), so a few more would
